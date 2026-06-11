@@ -1,8 +1,8 @@
 {
-  "name": "smartequalizerapopresetsmanager",
-  "version": "0.2.0",
+  "name": "smarteqpresetswitcher",
+  "version": "0.3.0",
   "private": true,
-  "description": "Tray-first Windows 11 preset manager for Equalizer APO.",
+  "description": "Cross-platform EQ preset switcher with Windows Equalizer APO and Linux PipeWire export support.",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -10,7 +10,20 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bootstrap:linux": "bash scripts/bootstrap-linux.sh",
+    "build:linux": "bash scripts/build-linux.sh",
+    "build:arch": "bash scripts/build-arch-package.sh",
+    "bootstrap:windows": "scripts\\bootstrap-windows.bat",
+    "build:windows": "scripts\\build-windows.bat",
+    "check:project": "bash scripts/check-project.sh",
+    "check:source": "bash scripts/check-project.sh --strict-source --skip-npm --skip-cargo",
+    "check:clean-source": "bash scripts/check-project.sh --strict-source --fail-local-generated --skip-npm --skip-cargo",
+    "build:linux:deb": "bash scripts/build-linux.sh --deb",
+    "build:linux:appimage": "bash scripts/build-linux.sh --appimage",
+    "build:linux:all": "bash scripts/build-linux.sh --all",
+    "build:linux:auto": "bash scripts/build-linux.sh --auto",
+    "build:linux:arch": "bash scripts/build-linux.sh --arch"
   },
   "dependencies": {
     "@lucide/svelte": "1.8.0",

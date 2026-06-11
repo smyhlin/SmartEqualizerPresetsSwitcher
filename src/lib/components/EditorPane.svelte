@@ -162,7 +162,7 @@
         {dirty ? 'Changes pending save' : 'All changes in storage'}
       </div>
       <div class="text-muted/40 font-bold">
-        APO Auto-Reload Enabled
+        Backend Auto-Reload Enabled
       </div>
     </div>
   </div>

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import {
     AudioLines,
+    CircleDot,
     Download,
     FolderInput,
     Search,
@@ -11,7 +12,9 @@
   import Button from '$lib/components/ui/button.svelte';
   import Input from '$lib/components/ui/input.svelte';
   import AboutModal from '$lib/components/AboutModal.svelte';
+  import AutoEqModal from '$lib/components/AutoEqModal.svelte';
   import ConfigEditorModal from '$lib/components/ConfigEditorModal.svelte';
+  import EqBackendModal from '$lib/components/EqBackendModal.svelte';
   import GroupSidebar from '$lib/components/GroupSidebar.svelte';
   import LogsModal from '$lib/components/LogsModal.svelte';
   import FooterBar from '$lib/components/layout/FooterBar.svelte';
@@ -20,17 +23,32 @@
   import TroubleshootModal from '$lib/components/TroubleshootModal.svelte';
   import { presetStore } from '$lib/store';
   import {
+    exportLinuxEqStatus,
     getAutorunEnabled,
+    getEqBackendStatus,
+    loadAutoEqIndex,
     loadLogs,
     installOrReinstallApo,
+    onAutoEqProgress,
+    onOpenAboutRequested,
     onRuntimeSettingsUpdated,
     openApoDeviceSelector,
     openRepositoryUrl,
     openLogsLocation,
-    setAutorunEnabled
+    setAutorunEnabled,
+    setupLinuxSystemEq
   } from '$lib/tauri';
-  import type { AppRuntimeSettings, LogSnapshot, PresetGroup, PresetItem, PresetLibrary } from '$lib/types';
-  import { uniqueName } from '$lib/utils';
+  import type {
+    AppRuntimeSettings,
+    AutoEqIndexEntry,
+    AutoEqProgressPayload,
+    EqBackendStatus,
+    LogSnapshot,
+    PresetGroup,
+    PresetItem,
+    PresetLibrary
+  } from '$lib/types';
+  import { sanitizeImportName, uniqueName } from '$lib/utils';
 
   let library: PresetLibrary | null = null;
   let selectedGroupName: string | null = null;
@@ -49,17 +67,27 @@
   let logsExists = false;
   let statusMessage = 'Loading presets...';
   let statusTone: 'info' | 'success' | 'error' = 'info';
+  let autoEqOpen = false;
+  let autoEqWarmupState: 'idle' | 'loading' | 'ready' | 'stale' | 'error' = 'idle';
+  let autoEqWarmupMessage = '';
   let autorunEnabled = false;
   let autorunLoaded = false;
   let autorunBusy = false;
+  let windowsToolsAvailable = false;
+  let eqBackendOpen = false;
+  let eqBackendStatus: EqBackendStatus | null = null;
+  let eqBackendBusy = false;
 
   onMount(() => {
+    windowsToolsAvailable = navigator.userAgent.toLowerCase().includes('windows');
     const unsubscribe = presetStore.subscribe((value) => {
       const preserveDraft = dirty && selectionStillExists(value);
       syncSelection(value, preserveDraft);
     });
     let disposed = false;
     let unlistenRuntimeSettings: (() => void) | null = null;
+    let unlistenOpenAbout: (() => void) | null = null;
+    let unlistenAutoEqProgress: (() => void) | null = null;
 
     void onRuntimeSettingsUpdated((value) => {
       if (!disposed) {
@@ -75,17 +103,56 @@
       })
       .catch((error) => setStatus(getErrorMessage(error), 'error'));
 
+    void onOpenAboutRequested(() => {
+      if (!disposed) {
+        handleOpenAbout();
+      }
+    })
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        unlistenOpenAbout = unlisten;
+      })
+      .catch((error) => setStatus(getErrorMessage(error), 'error'));
+
+    void onAutoEqProgress((value) => {
+      if (!disposed) {
+        syncAutoEqWarmup(value);
+      }
+    })
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        unlistenAutoEqProgress = unlisten;
+      })
+      .catch((error) => {
+        autoEqWarmupState = 'error';
+        autoEqWarmupMessage = getErrorMessage(error);
+      });
+
     void loadAutorunState();
 
     void presetStore
       .start()
-      .then(() => setStatus('Ready to manage Equalizer APO presets.'))
+      .then(() => {
+        setStatus('Ready to manage EQ presets.');
+        void refreshEqBackendStatus(false);
+        setTimeout(() => {
+          void prefetchAutoEqIndex();
+        }, 0);
+      })
       .catch((error) => setStatus(getErrorMessage(error), 'error'));
 
     return () => {
       disposed = true;
       unsubscribe();
       unlistenRuntimeSettings?.();
+      unlistenOpenAbout?.();
+      unlistenAutoEqProgress?.();
       void presetStore.stop();
     };
   });
@@ -181,6 +248,37 @@
     autorunBusy = false;
   }
 
+  function syncAutoEqWarmup(value: AutoEqProgressPayload) {
+    if (value.operation !== 'index') {
+      return;
+    }
+
+    autoEqWarmupMessage = value.message;
+
+    if (value.phase === 'error') {
+      autoEqWarmupState = 'error';
+      return;
+    }
+
+    if (
+      value.phase === 'start' ||
+      value.phase === 'check-cache' ||
+      value.phase === 'fetch-index'
+    ) {
+      autoEqWarmupState = 'loading';
+      return;
+    }
+
+    if (value.source === 'stale-cache') {
+      autoEqWarmupState = 'stale';
+      return;
+    }
+
+    if (value.phase === 'done' || value.phase === 'cache-hit') {
+      autoEqWarmupState = 'ready';
+    }
+  }
+
   function getErrorMessage(error: unknown) {
     if (typeof error === 'string') {
       return error;
@@ -215,6 +313,22 @@
     } catch (error) {
       autorunLoaded = true;
       setStatus(getErrorMessage(error), 'error');
+    }
+  }
+
+  async function prefetchAutoEqIndex() {
+    if (autoEqWarmupState === 'loading' || autoEqWarmupState === 'ready') {
+      return;
+    }
+
+    autoEqWarmupState = 'loading';
+    autoEqWarmupMessage = 'Preparing AutoEQ index.';
+
+    try {
+      await loadAutoEqIndex(false);
+    } catch (error) {
+      autoEqWarmupState = 'error';
+      autoEqWarmupMessage = getErrorMessage(error);
     }
   }
 
@@ -360,6 +474,7 @@
     );
     if (snapshot) {
       dirty = false;
+      await refreshEqBackendStatus(false);
     }
   }
 
@@ -379,10 +494,14 @@
       dirty = false;
     }
 
-    await withBusy(
+    const snapshot = await withBusy(
       () => presetStore.applyPreset(selectedGroupName as string, selectedPresetName as string),
       `Applied ${selectedPresetName}`
     );
+
+    if (snapshot) {
+      await refreshEqBackendStatus(false);
+    }
   }
 
   async function handleApplyPreset(name: string) {
@@ -398,7 +517,7 @@
   async function handleImportPresets() {
     const selection = await open({
       multiple: true,
-      filters: [{ name: 'Equalizer APO presets or WAV files', extensions: ['txt', 'wav'] }]
+      filters: [{ name: 'EQ preset files or WAV files', extensions: ['txt', 'wav'] }]
     });
 
     const paths = Array.isArray(selection) ? selection : selection ? [selection] : [];
@@ -420,10 +539,75 @@
       selectedGroupName = nextGroupName;
     }
 
-    await withBusy(
+    const snapshot = await withBusy(
       () => presetStore.importPresets(targetGroupName as string, paths),
       `Imported ${paths.length} preset${paths.length === 1 ? '' : 's'}`
     );
+
+    if (snapshot) {
+      await refreshEqBackendStatus(false);
+    }
+  }
+
+  function handleOpenAutoEq() {
+    autoEqOpen = true;
+  }
+
+  function handleCloseAutoEq() {
+    autoEqOpen = false;
+  }
+
+  async function handleImportAutoEq(value: {
+    entry: AutoEqIndexEntry;
+    presetText: string;
+  }) {
+    if (!(await confirmDiscardIfNeeded())) {
+      return false;
+    }
+
+    let targetGroupName = selectedGroupName;
+    let snapshotContext = library;
+
+    if (!targetGroupName) {
+      const nextGroupName = uniqueName(
+        'Imported',
+        snapshotContext?.groups.map((group) => group.name) ?? []
+      );
+      const createdGroup = await withBusy(
+        () => presetStore.createGroup(nextGroupName),
+        `Created group ${nextGroupName}`
+      );
+      if (!createdGroup) {
+        return false;
+      }
+
+      targetGroupName = nextGroupName;
+      snapshotContext = createdGroup;
+    }
+
+    const existingPresetNames =
+      snapshotContext?.groups
+        .find((group) => group.name === targetGroupName)
+        ?.presets.map((preset) => preset.name) ?? [];
+
+    const presetName = uniqueName(
+      sanitizeImportName(`${value.entry.n} (${value.entry.s}) GraphicEQ`),
+      existingPresetNames
+    );
+
+    const snapshot = await withBusy(
+      () => presetStore.createPreset(targetGroupName as string, presetName, value.presetText),
+      `Imported ${presetName} from AutoEQ`
+    );
+    if (!snapshot) {
+      return false;
+    }
+
+    selectedGroupName = targetGroupName;
+    selectedPresetName = presetName;
+    draft = presetForGroup(snapshot, targetGroupName as string, presetName)?.content ?? value.presetText;
+    dirty = false;
+    return true;
   }
 
   async function handleToggleConvolution(value: { groupName: string; presetName: string; enabled: boolean }) {
@@ -486,7 +670,7 @@
   async function handleImportAppData() {
     const selection = await open({
       multiple: false,
-      filters: [{ name: 'SmartEqualizerAPO Backup', extensions: ['json'] }]
+      filters: [{ name: 'SmartEQPresetSwitcher Backup', extensions: ['json'] }]
     });
 
     if (typeof selection !== 'string') {
@@ -568,7 +752,7 @@
 
     const destination = await save({
       defaultPath: `${selectedPresetName}.txt`,
-      filters: [{ name: 'Equalizer APO Presets', extensions: ['txt'] }]
+      filters: [{ name: 'EQ Presets', extensions: ['txt'] }]
     });
 
     if (!destination) {
@@ -583,7 +767,7 @@
 
   async function handleExportAppSettings() {
     const destination = await save({
-      defaultPath: 'smart-equalizer-apo-backup.json',
+      defaultPath: 'smart-eq-preset-switcher-backup.json',
       filters: [{ name: 'JSON', extensions: ['json'] }]
     });
 
@@ -605,8 +789,8 @@
       });
       setStatus(
         actualEnabled
-          ? 'Launch on Windows startup enabled.'
-          : 'Launch on Windows startup disabled.',
+          ? 'Start with login enabled.'
+          : 'Start with login disabled.',
         'success'
       );
     } catch (error) {
@@ -615,6 +799,94 @@
     }
   }
 
+
+
+  function eqStatusTone(status: EqBackendStatus | null) {
+    if (!status) {
+      return 'bg-accent-soft text-accent border-accent/20';
+    }
+
+    if (status.state === 'connected' || status.state === 'export_ready') {
+      return 'bg-success-soft text-success border-success/25';
+    }
+
+    if (status.state === 'setup_needed' || status.state === 'no_active_preset') {
+      return 'bg-amber-500/10 text-amber-200 border-amber-400/25';
+    }
+
+    return 'bg-surface-2 text-muted border-border';
+  }
+
+  function eqStatusDot(status: EqBackendStatus | null) {
+    if (!status) {
+      return 'bg-accent';
+    }
+
+    if (status.state === 'connected' || status.state === 'export_ready') {
+      return 'bg-success';
+    }
+
+    if (status.state === 'setup_needed' || status.state === 'no_active_preset') {
+      return 'bg-amber-300';
+    }
+
+    return 'bg-muted';
+  }
+
+  async function refreshEqBackendStatus(showError = true) {
+    try {
+      eqBackendStatus = await getEqBackendStatus();
+    } catch (error) {
+      if (showError) {
+        setStatus(getErrorMessage(error), 'error');
+      }
+    }
+  }
+
+  function handleOpenEqBackend() {
+    eqBackendOpen = true;
+    void refreshEqBackendStatus();
+  }
+
+  function handleCloseEqBackend() {
+    eqBackendOpen = false;
+  }
+
+  async function handleSetupEqBackend() {
+    eqBackendBusy = true;
+
+    try {
+      if (eqBackendStatus?.platform === 'linux') {
+        eqBackendStatus = await setupLinuxSystemEq();
+        setStatus(eqBackendStatus.statusLabel, 'success');
+      } else if (eqBackendStatus?.platform === 'windows') {
+        handleOpenTroubleshoot();
+      } else {
+        await refreshEqBackendStatus();
+      }
+    } catch (error) {
+      setStatus(getErrorMessage(error), 'error');
+    } finally {
+      eqBackendBusy = false;
+    }
+  }
+
+  function handleOpenEqBackendPath(path: string) {
+    if (!path) {
+      return;
+    }
+
+    void openBackendPath(path);
+  }
+
+  async function openBackendPath(path: string) {
+    try {
+      const { revealPathInExplorer } = await import('$lib/tauri');
+      await revealPathInExplorer(path);
+    } catch (error) {
+      setStatus(getErrorMessage(error), 'error');
+    }
+  }
 
   function handleOpenConfigEditor() {
     if (selectedGroupName && selectedPresetName) {
@@ -635,6 +907,10 @@
   }
 
   function handleOpenTroubleshoot() {
+    if (!windowsToolsAvailable) {
+      setStatus('Equalizer APO tools are Windows-only. Linux uses config export/TUI workflows.', 'info');
+      return;
+    }
     troubleshootOpen = true;
   }
 
@@ -644,10 +920,10 @@
 </script>
 
 <svelte:head>
-  <title>SmartEqualizerAPOPresetsManager</title>
+  <title>SmartEQPresetSwitcher</title>
   <meta
     name="description"
-    content="Tray-first Equalizer APO preset management for Windows 11."
+    content="Cross-platform EQ preset switching for Windows and Linux."
   />
 </svelte:head>
 
@@ -661,10 +937,10 @@
           </div>
           <div class="min-w-0">
             <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted">
-              SmartEqualizer APO
+              SmartEQPresetSwitcher
             </p>
             <h1 class="mt-1 text-[20px] font-semibold tracking-tight text-foreground sm:text-[22px]">
-              Equalizer APO preset manager
+              Cross-platform EQ preset switcher
             </h1>
             <p class="mt-1 max-w-3xl text-sm leading-6 text-muted">
               One active preset per group. Apply changes instantly, keep the tray checkmarks in sync, and work from a writable app folder.
@@ -682,6 +958,59 @@
         </div>
 
         <div class="flex flex-wrap justify-start gap-2 xl:justify-end">
+          <Button
+            variant="secondary"
+            onclick={handleOpenAutoEq}
+            disabled={busy}
+            title={autoEqWarmupMessage || 'Import from AutoEQ'}
+          >
+            <span class="text-[15px] leading-none text-accent">🎧</span>
+            Import from AutoEQ
+            {#if autoEqWarmupState !== 'idle'}
+              <span
+                class={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${
+                  autoEqWarmupState === 'ready'
+                    ? 'bg-success-soft text-success'
+                    : autoEqWarmupState === 'stale'
+                      ? 'bg-amber-500/12 text-amber-300'
+                      : autoEqWarmupState === 'error'
+                        ? 'bg-danger-soft text-danger'
+                        : 'bg-accent-soft text-accent'
+                }`}
+              >
+                <span
+                  class={`h-1.5 w-1.5 rounded-full ${
+                    autoEqWarmupState === 'ready'
+                      ? 'bg-success'
+                      : autoEqWarmupState === 'stale'
+                        ? 'bg-amber-300'
+                        : autoEqWarmupState === 'error'
+                          ? 'bg-danger'
+                          : 'animate-pulse bg-accent'
+                  }`}
+                ></span>
+                {#if autoEqWarmupState === 'ready'}
+                  Warm
+                {:else if autoEqWarmupState === 'stale'}
+                  Cached
+                {:else if autoEqWarmupState === 'error'}
+                  Retry
+                {:else}
+                  Warming
+                {/if}
+              </span>
+            {/if}
+          </Button>
+          <Button
+            variant="secondary"
+            onclick={handleOpenEqBackend}
+            disabled={busy}
+            title={eqBackendStatus?.statusDetail ?? 'Check EQ backend connection'}
+            class={`border ${eqStatusTone(eqBackendStatus)}`}
+          >
+            <CircleDot size={14} class={eqStatusDot(eqBackendStatus)} />
+            {eqBackendStatus?.statusLabel ?? 'EQ backend'}
+          </Button>
           <Button variant="secondary" onclick={handleImportAppData}>
             <FolderInput size={14} />
             Import App Data
@@ -714,7 +1043,7 @@
         {search}
         presetFilePath={
           library && selectedGroupName && selectedPresetName
-            ? `${library.appDataDir}\\presets\\${selectedGroupName}\\${selectedPresetName}.txt`
+            ? `${library.appDataDir}/presets/${selectedGroupName}/${selectedPresetName}.txt`
             : null
         }
         onSelect={handlePresetSelect}
@@ -750,11 +1079,11 @@
       {dirty}
       presetFilePath={
         library && selectedGroupName && selectedPresetName
-          ? `${library.appDataDir}\\presets\\${selectedGroupName}\\${selectedPresetName}.txt`
+          ? `${library.appDataDir}/presets/${selectedGroupName}/${selectedPresetName}.txt`
           : null
       }
       configPath={library?.configPath ?? null}
-      configTargetLabel="Equalizer APO config"
+      configTargetLabel="Backend config"
       panelKey={selectedGroupName && selectedPresetName ? `${selectedGroupName}::${selectedPresetName}` : ''}
       presetConvolution={currentPreset()?.convolution ?? null}
       onDraftChange={(value) => { draft = value; dirty = true; }}
@@ -769,13 +1098,15 @@
       onOpenRepository={handleOpenRepository}
     />
 
-    <TroubleshootModal
-      open={troubleshootOpen}
-      library={library}
-      onClose={handleCloseTroubleshoot}
-      onInstall={handleInstallOrReinstallApo}
-      onOpenSelector={handleOpenApoDeviceSelector}
-    />
+    {#if windowsToolsAvailable}
+      <TroubleshootModal
+        open={troubleshootOpen}
+        library={library}
+        onClose={handleCloseTroubleshoot}
+        onInstall={handleInstallOrReinstallApo}
+        onOpenSelector={handleOpenApoDeviceSelector}
+      />
+    {/if}
 
     <LogsModal
       open={logsOpen}
@@ -786,6 +1117,26 @@
       onClose={handleCloseLogs}
       onRefresh={loadLogsSnapshot}
       onOpenLocation={handleOpenLogsLocation}
+    />
+
+    <AutoEqModal
+      open={autoEqOpen}
+      targetGroupName={selectedGroupName}
+      eqBackendStatus={eqBackendStatus}
+      onClose={handleCloseAutoEq}
+      onImport={handleImportAutoEq}
+    />
+
+    <EqBackendModal
+      open={eqBackendOpen}
+      status={eqBackendStatus}
+      busy={eqBackendBusy}
+      {windowsToolsAvailable}
+      onClose={handleCloseEqBackend}
+      onRefresh={() => refreshEqBackendStatus()}
+      onSetup={handleSetupEqBackend}
+      onOpenTroubleshoot={handleOpenTroubleshoot}
+      onOpenPath={handleOpenEqBackendPath}
     />
 
     <FooterBar
@@ -799,6 +1150,7 @@
       onOpenTroubleshoot={handleOpenTroubleshoot}
       onOpenAbout={handleOpenAbout}
       onAutorunToggle={handleAutorunToggle}
+      showTroubleshoot={windowsToolsAvailable}
     />
   </div>
 </div>

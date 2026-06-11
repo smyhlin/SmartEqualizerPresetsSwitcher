@@ -15,7 +15,7 @@
     draft = '',
     dirty = false,
     configPath = null,
-    configTargetLabel = 'Equalizer APO config',
+    configTargetLabel = 'Backend config',
     onDraftChange,
     onSave,
     onClose,

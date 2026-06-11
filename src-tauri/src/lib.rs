@@ -1,33 +1,46 @@
+mod autoeq;
 mod commands;
 mod logging;
 mod state;
 
+// Expose additional modules publicly so that they can be called
+// directly from the binary (e.g. for boot‑sync and autorun when
+// running headless).
+pub mod autorun;
+pub mod linux_eq;
+pub mod tui;
+
 use tauri::{
-    menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
+    menu::{
+        CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem,
+        SubmenuBuilder,
+    },
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, Runtime, State, WindowEvent,
 };
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 #[cfg(desktop)]
-use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::{
     commands::{
         apply_preset, attach_convolution_wav, create_group, create_preset, delete_group,
-        delete_preset, export_app_settings, export_preset, get_autorun_enabled, get_config_path,
-        import_app_settings, import_presets, install_or_reinstall_apo, load_logs, load_presets,
-        move_preset, open_apo_device_selector, open_repository_url, rebuild_tray_menu,
-        open_logs_location, remove_convolution_wav, rename_group, rename_preset, reorder_groups,
-        reveal_path_in_explorer, save_preset, set_autorun_enabled, set_config_path, set_group_emoji,
+        delete_preset, export_app_settings, export_preset, get_autoeq_graphic_preset, get_autoeq_preset_variant,
+        get_autorun_enabled, get_config_path, import_app_settings, import_presets,
+        export_linux_eq_status, get_eq_backend_status, install_or_reinstall_apo, load_autoeq_index, load_logs, load_presets, move_preset, setup_linux_system_eq,
+        open_apo_device_selector, open_logs_location, open_repository_url, rebuild_tray_menu,
+        remove_convolution_wav, rename_group, rename_preset, reorder_groups,
+        reveal_path_in_explorer, save_preset, set_autorun_enabled, set_config_path,
+        set_group_emoji,
     },
     logging::append_log_line,
     state::{
         AppError, AppRuntimeSettings, AppState, PresetLibrary, TraySelection,
-        EVENT_PRESETS_UPDATED, EVENT_SETTINGS_UPDATED,
+        EVENT_OPEN_ABOUT_REQUESTED, EVENT_PRESETS_UPDATED, EVENT_SETTINGS_UPDATED,
     },
 };
 
-const TRAY_ID: &str = "smart-equalizer-tray";
+const TRAY_ID: &str = "smart-eq-tray";
 const WINDOW_LABEL: &str = "main";
 const MENU_ID_MANAGE: &str = "menu.manage";
 const MENU_ID_AUTORUN: &str = "menu.autorun";
@@ -36,8 +49,59 @@ const MENU_ID_EXIT: &str = "menu.exit";
 const MENU_ID_EMPTY_GROUPS: &str = "menu.empty-groups";
 const MENU_ID_EMPTY_PRESETS_PREFIX: &str = "menu.empty-presets";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupMode {
+    Gui,
+    Tray,
+}
+
+fn startup_mode() -> StartupMode {
+    let mut mode = StartupMode::Gui;
+
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--gui" => mode = StartupMode::Gui,
+            "--tray" | "--background" | "--minimized" => mode = StartupMode::Tray,
+            _ => {}
+        }
+    }
+
+    mode
+}
+
+
+fn truthy_env_value(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn tray_enabled_for_startup(mode: StartupMode) -> bool {
+    if truthy_env_value("SMART_EQ_DISABLE_TRAY") {
+        return false;
+    }
+
+    if matches!(mode, StartupMode::Tray) {
+        return true;
+    }
+
+    // Linux GUI mode now uses an X11/XWayland launcher by default, so the tray
+    // can be on again. Users who hit a distro-specific AppIndicator bug can run
+    // SMART_EQ_DISABLE_TRAY=1 smart-eq-preset-switcher --gui.
+    true
+}
+
 pub fn try_handle_cli_mode() -> Option<i32> {
     state::try_handle_cli_mode()
+}
+
+pub fn log_process_error(level: &str, message: impl AsRef<str>) {
+    logging::append_log_line(level, message);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -49,7 +113,26 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
             let _ = show_main_window(&app);
         }));
-        builder = builder.plugin(tauri_plugin_autostart::Builder::new().build());
+        // Removed the autostart plugin.  Autorun is now handled by
+        // our own cross‑platform implementation in the `autorun` module.
+
+        // Initialise the global shortcut plugin with a handler that
+        // toggles the main window when the configured key is pressed.
+        let toggle_shortcut_for_handler = Shortcut::new(
+            Some(Modifiers::ALT | Modifiers::CONTROL),
+            Code::KeyE,
+        );
+        builder = builder.plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |app, shortcut, event| {
+                    if *shortcut == toggle_shortcut_for_handler
+                        && event.state() == ShortcutState::Pressed
+                    {
+                        let _ = toggle_main_window(app);
+                    }
+                })
+                .build(),
+        );
     }
 
     let builder = builder
@@ -59,30 +142,77 @@ pub fn run() {
             app.manage(state);
             append_log_line("INFO", "Application initialized.");
 
-            let menu = construct_tray_menu(app.handle())?;
-            let icon = app
-                .default_window_icon()
-                .cloned()
-                .ok_or(AppError::MissingIcon)?;
+            let mode = startup_mode();
+            append_log_line("INFO", format!("Startup mode: {mode:?}."));
 
-            let _tray = TrayIconBuilder::with_id(TRAY_ID)
-                .icon(icon)
-                .tooltip("SmartEqualizer APO Presets Manager")
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(handle_tray_menu_event)
-                .on_tray_icon_event(handle_tray_icon_event)
-                .build(app)?;
+            if tray_enabled_for_startup(mode) {
+                append_log_line("INFO", "Initializing tray icon.");
+                let menu = construct_tray_menu(app.handle())?;
+                let icon = app
+                    .default_window_icon()
+                    .cloned()
+                    .ok_or(AppError::MissingIcon)?;
+
+                match TrayIconBuilder::with_id(TRAY_ID)
+                    .icon(icon)
+                    .tooltip("SmartEQPresetSwitcher")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(handle_tray_menu_event)
+                    .on_tray_icon_event(handle_tray_icon_event)
+                    .build(app)
+                {
+                    Ok(_tray) => append_log_line("INFO", "Tray icon initialized."),
+                    Err(error) => {
+                        append_log_line("ERROR", format!("Tray icon initialization failed: {error}"));
+                        if matches!(mode, StartupMode::Tray) {
+                            return Err(error.into());
+                        }
+                    }
+                }
+            } else {
+                append_log_line("INFO", "Tray disabled by SMART_EQ_DISABLE_TRAY.");
+            }
 
             configure_main_window(app.handle())?;
             maybe_prompt_for_config_migration(app.handle())?;
             let _ = refresh_runtime(app.handle());
+
+            match mode {
+                StartupMode::Gui => {
+                    if let Err(error) = show_main_window(app.handle()) {
+                        append_log_line("ERROR", format!("Failed to show main window on startup: {error}"));
+                    }
+                }
+                StartupMode::Tray => {
+                    if let Err(error) = hide_main_window(app.handle()) {
+                        append_log_line("WARN", format!("Failed to hide main window for tray startup: {error}"));
+                    }
+                }
+            }
+
+            // Register the global shortcut within the setup context.  This
+            // ensures the OS knows which shortcut we want to listen for.
+            #[cfg(desktop)]
+            {
+                let toggle_shortcut = Shortcut::new(
+                    Some(Modifiers::ALT | Modifiers::CONTROL),
+                    Code::KeyE,
+                );
+                let _ = app.global_shortcut().register(toggle_shortcut);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_config_path,
+            get_eq_backend_status,
+            export_linux_eq_status,
+            setup_linux_system_eq,
             set_config_path,
             load_presets,
+            load_autoeq_index,
+            get_autoeq_graphic_preset,
+            get_autoeq_preset_variant,
             apply_preset,
             save_preset,
             create_group,
@@ -117,7 +247,19 @@ pub fn run() {
 }
 
 pub(crate) fn refresh_runtime<R: Runtime>(app: &AppHandle<R>) -> Result<PresetLibrary, AppError> {
-    rebuild_native_tray_menu(app)?;
+    // The GUI path intentionally runs without a native tray on Linux/KDE to
+    // avoid AppIndicator/WebKitGTK runtime crashes. Runtime refresh must still
+    // succeed when no tray exists; tray rebuilding is best-effort only.
+    if let Err(error) = rebuild_native_tray_menu(app) {
+        match error {
+            AppError::MissingTray => {
+                append_log_line("INFO", "Skipping tray menu rebuild because no tray icon is active.");
+            }
+            other => {
+                append_log_line("WARN", format!("Tray menu rebuild failed: {other}"));
+            }
+        }
+    }
 
     let snapshot = {
         let state: State<'_, AppState> = app.state();
@@ -133,7 +275,16 @@ pub(crate) fn refresh_runtime<R: Runtime>(app: &AppHandle<R>) -> Result<PresetLi
 pub(crate) fn refresh_runtime_settings<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<AppRuntimeSettings, AppError> {
-    rebuild_native_tray_menu(app)?;
+    if let Err(error) = rebuild_native_tray_menu(app) {
+        match error {
+            AppError::MissingTray => {
+                append_log_line("INFO", "Skipping tray settings rebuild because no tray icon is active.");
+            }
+            other => {
+                append_log_line("WARN", format!("Tray settings rebuild failed: {other}"));
+            }
+        }
+    }
     emit_runtime_settings(app)
 }
 
@@ -149,25 +300,15 @@ pub(crate) fn set_autorun_enabled_state<R: Runtime>(
     app: &AppHandle<R>,
     enabled: bool,
 ) -> Result<(), AppError> {
-    #[cfg(desktop)]
-    {
-        let autostart = app.autolaunch();
-        if enabled {
-            autostart
-                .enable()
-                .map_err(|error| AppError::Message(format!("Failed to enable Windows startup: {error}")))?;
-        } else {
-            autostart
-                .disable()
-                .map_err(|error| AppError::Message(format!("Failed to disable Windows startup: {error}")))?;
-        }
+    // Delegate autorun control to the cross‑platform implementation in
+    // the `autorun` module.  Ignore the unused `app` parameter on
+    // non‑desktop targets to avoid warnings.
+    let _ = app;
+    if enabled {
+        crate::autorun::enable()?;
+    } else {
+        crate::autorun::disable()?;
     }
-
-    #[cfg(not(desktop))]
-    {
-        let _ = (app, enabled);
-    }
-
     Ok(())
 }
 
@@ -178,19 +319,8 @@ fn emit_runtime_settings<R: Runtime>(app: &AppHandle<R>) -> Result<AppRuntimeSet
 }
 
 fn current_autorun_enabled<R: Runtime>(app: &AppHandle<R>) -> Result<bool, AppError> {
-    #[cfg(desktop)]
-    {
-        return app
-            .autolaunch()
-            .is_enabled()
-            .map_err(|error| AppError::Message(format!("Failed to read Windows startup setting: {error}")));
-    }
-
-    #[cfg(not(desktop))]
-    {
-        let _ = app;
-        Ok(false)
-    }
+    let _ = app;
+    crate::autorun::status()
 }
 
 fn configure_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
@@ -226,7 +356,7 @@ fn maybe_prompt_for_config_migration<R: Runtime>(app: &AppHandle<R>) -> Result<(
     let accepted = app
         .dialog()
         .message(format!(
-            "Equalizer APO is currently configured to use a protected config folder.\n\nSmartEqualizerAPOPresetsManager works best with a writable config path:\n{default_path}\n\nLet the app switch Equalizer APO to that location now?"
+            "Equalizer APO is currently configured to use a protected config folder.\n\nSmartEQPresetSwitcher works best with a writable config path:\n{default_path}\n\nLet the app switch Equalizer APO to that location now?"
         ))
         .title("Move Equalizer APO ConfigPath")
         .kind(MessageDialogKind::Warning)
@@ -269,33 +399,83 @@ fn maybe_prompt_for_config_migration<R: Runtime>(app: &AppHandle<R>) -> Result<(
     Ok(())
 }
 
+fn main_window<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::WebviewWindow<R>, AppError> {
+    app.get_webview_window(WINDOW_LABEL).ok_or_else(|| {
+        let message = "The main window is not available yet.".to_string();
+        append_log_line("ERROR", &message);
+        AppError::Message(message)
+    })
+}
+
+fn hide_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
+    let window = main_window(app)?;
+    window.hide()?;
+    append_log_line("INFO", "Main window hidden.");
+    Ok(())
+}
+
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
-    if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
-        if window.is_minimized()? {
-            window.unminimize()?;
+    let window = main_window(app)?;
+    append_log_line("INFO", "Showing main window.");
+
+    match window.is_minimized() {
+        Ok(true) => {
+            if let Err(error) = window.unminimize() {
+                append_log_line("WARN", format!("Failed to unminimize main window: {error}"));
+            }
         }
-        window.show()?;
-        window.set_focus()?;
+        Ok(false) => {}
+        Err(error) => append_log_line("WARN", format!("Failed to query main window minimized state: {error}")),
+    }
+
+    if let Err(error) = window.show() {
+        append_log_line("ERROR", format!("Failed to call window.show(): {error}"));
+        return Err(AppError::from(error));
+    }
+
+    if let Err(error) = window.set_focus() {
+        // Wayland/KDE can deny focus stealing from tray callbacks. Showing the
+        // window is what matters; focus failure must not close the app or show
+        // a scary error dialog.
+        append_log_line("WARN", format!("Main window shown but focus request was denied: {error}"));
+    }
+
+    match window.is_visible() {
+        Ok(true) => append_log_line("INFO", "Main window is visible."),
+        Ok(false) => append_log_line("ERROR", "Main window show call returned, but window is still not visible."),
+        Err(error) => append_log_line("WARN", format!("Failed to query main window visible state: {error}")),
     }
 
     Ok(())
 }
 
+/// Toggles the visibility of the main window.  If the window is
+/// currently visible it will be hidden; otherwise it will be shown
+/// and focused.  Errors are logged but not returned to the caller.
+fn toggle_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
+    let window = main_window(app)?;
+    let visible = window.is_visible().unwrap_or(false);
+    if visible {
+        hide_main_window(app)?;
+    } else {
+        show_main_window(app)?;
+    }
+    Ok(())
+}
+
 fn show_about_dialog<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
-    let snapshot = {
-        let state: State<'_, AppState> = app.state();
-        let mut guard = state.lock()?;
-        guard.snapshot()?
-    };
+    append_log_line("INFO", "Opening About dialog.");
+
+    // Emit the app-modal event for an already loaded GUI, but also show a
+    // native dialog so About still works from the tray even if the hidden
+    // webview has not mounted/listened yet.
+    let _ = app.emit(EVENT_OPEN_ABOUT_REQUESTED, ());
 
     app.dialog()
-        .message(format!(
-            "SmartEqualizerAPOPresetsManager\n\nWindows 11 tray-first preset manager for Equalizer APO.\n\nConfig path:\n{}\n\nGroups: {}\nPresets: {}",
-            snapshot.config_path,
-            snapshot.groups.len(),
-            snapshot.groups.iter().map(|group| group.presets.len()).sum::<usize>()
-        ))
-        .title("About SmartEqualizer APO")
+        .message(
+            "SmartEQPresetSwitcher\n\nCross-platform EQ preset switcher for Windows and Linux.\n\nOn Windows it integrates with Equalizer APO. On Linux it provides GUI, tray, TUI, boot-sync and EQ export workflows."
+        )
+        .title("About SmartEQPresetSwitcher")
         .kind(MessageDialogKind::Info)
         .blocking_show();
 
@@ -303,6 +483,7 @@ fn show_about_dialog<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
 }
 
 fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::MenuEvent) {
+    append_log_line("INFO", format!("Tray menu action: {}", event.id().as_ref()));
     let result = match event.id().as_ref() {
         MENU_ID_MANAGE => show_main_window(app),
         MENU_ID_AUTORUN => toggle_autorun_from_tray(app),
@@ -315,11 +496,7 @@ fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::Me
     };
 
     if let Err(error) = result {
-        app.dialog()
-            .message(error.to_string())
-            .title("SmartEqualizer APO")
-            .kind(MessageDialogKind::Error)
-            .blocking_show();
+        append_log_line("ERROR", format!("Tray menu action failed: {error}"));
     }
 }
 
@@ -379,10 +556,9 @@ fn construct_tray_menu<R: Runtime>(app: &AppHandle<R>) -> Result<Menu<R>, AppErr
 
     let presets_submenu = build_presets_submenu(app, &snapshot, &targets)?;
     let manage_item = MenuItemBuilder::with_id(MENU_ID_MANAGE, "Manage Presets...").build(app)?;
-    let autorun_item =
-        CheckMenuItemBuilder::with_id(MENU_ID_AUTORUN, "Launch on Windows startup")
-            .checked(autorun_enabled)
-            .build(app)?;
+    let autorun_item = CheckMenuItemBuilder::with_id(MENU_ID_AUTORUN, "Start with login")
+        .checked(autorun_enabled)
+        .build(app)?;
     let about_item = MenuItemBuilder::with_id(MENU_ID_ABOUT, "About...").build(app)?;
     let exit_item = MenuItemBuilder::with_id(MENU_ID_EXIT, "Exit").build(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
@@ -419,8 +595,8 @@ fn build_presets_submenu<R: Runtime>(
 
     let active_label = active_preset_label(snapshot);
     let active_item = MenuItemBuilder::with_id("menu.active.current", active_label.as_str())
-    .enabled(false)
-    .build(app)?;
+        .enabled(false)
+        .build(app)?;
     builder = builder.item(&active_item);
 
     for group in &snapshot.groups {
@@ -437,9 +613,13 @@ fn build_presets_submenu<R: Runtime>(
             for preset in &group.presets {
                 let menu_id = targets
                     .iter()
-                    .find(|(_, selection)| selection.group == group.name && selection.preset == preset.name)
+                    .find(|(_, selection)| {
+                        selection.group == group.name && selection.preset == preset.name
+                    })
                     .map(|(id, _)| id.as_str())
-                    .ok_or_else(|| AppError::UnknownMenuItem(format!("{}/{}", group.name, preset.name)))?;
+                    .ok_or_else(|| {
+                        AppError::UnknownMenuItem(format!("{}/{}", group.name, preset.name))
+                    })?;
                 let item = CheckMenuItemBuilder::with_id(menu_id, &preset.name)
                     .checked(group.active_preset.as_deref() == Some(preset.name.as_str()))
                     .build(app)?;
@@ -475,7 +655,12 @@ fn build_tray_targets(snapshot: &PresetLibrary) -> Vec<(String, TraySelection)> 
 }
 
 fn menu_group_label(group: &crate::state::PresetGroup) -> String {
-    match group.emoji.as_deref().map(str::trim).filter(|emoji| !emoji.is_empty()) {
+    match group
+        .emoji
+        .as_deref()
+        .map(str::trim)
+        .filter(|emoji| !emoji.is_empty())
+    {
         Some(emoji) => format!("{emoji} {}", group.name),
         None => group.name.clone(),
     }

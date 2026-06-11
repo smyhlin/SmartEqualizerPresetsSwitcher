@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "SmartEqualizerAPOPresetsManager",
-  "version": "0.2.0",
-  "identifier": "com.myhli.smartequalizerapopresetsmanager",
+  "productName": "SmartEQPresetSwitcher",
+  "version": "0.3.0",
+  "identifier": "com.myhli.smarteqpresetswitcher",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -13,12 +13,12 @@
     "windows": [
       {
         "label": "main",
-        "title": "SmartEqualizerAPOPresetsManager",
+        "title": "SmartEQPresetSwitcher",
         "width": 1480,
         "height": 920,
         "minWidth": 1200,
         "minHeight": 760,
-        "visible": false,
+        "visible": true,
         "resizable": true,
         "center": true,
         "decorations": true,
@@ -35,12 +35,12 @@
     "active": true,
     "license": "MIT",
     "licenseFile": "../LICENSE",
-    "shortDescription": "Tray-first Windows 11 preset manager for Equalizer APO.",
-    "longDescription": "SmartEqualizer APO Presets Manager is a Windows 11 desktop app for organizing, editing, applying, importing, exporting, and backing up Equalizer APO presets. It also supports Equalizer APO install and reinstall troubleshooting, convolution WAV attachments, tray-based preset switching, and launch-on-startup control.",
+    "shortDescription": "Cross-platform EQ preset switcher for Windows and Linux audio backends.",
+    "longDescription": "SmartEQPresetSwitcher organizes, edits, applies, imports, exports, and backs up EQ presets across supported desktop audio backends. On Windows it integrates with Equalizer APO. On Linux it provides TUI/headless operation and exports the active preset for Linux system EQ workflows such as PipeWire.",
     "resources": [
       "resources/scripts/install-apo.ps1"
     ],
-    "targets": "nsis",
+    "targets": "all",
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"

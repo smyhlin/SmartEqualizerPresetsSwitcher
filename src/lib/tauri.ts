@@ -1,13 +1,36 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-import type { AppRuntimeSettings, LogSnapshot, PresetLibrary } from '$lib/types';
+import type {
+  AppRuntimeSettings,
+  AutoEqIndexEntry,
+  AutoEqPresetVariant,
+  AutoEqProgressPayload,
+  EqBackendStatus,
+  LogSnapshot,
+  PresetLibrary
+} from '$lib/types';
 
-export const PRESETS_UPDATED_EVENT = 'smart-equalizer://presets-updated';
-export const SETTINGS_UPDATED_EVENT = 'smart-equalizer://settings-updated';
+export const PRESETS_UPDATED_EVENT = 'smart-eq://presets-updated';
+export const SETTINGS_UPDATED_EVENT = 'smart-eq://settings-updated';
+export const OPEN_ABOUT_EVENT = 'smart-eq://open-about';
+export const AUTOEQ_PROGRESS_EVENT = 'smart-eq://autoeq-progress';
 
 export function getConfigPath() {
   return invoke<string>('get_config_path');
+}
+
+
+export function getEqBackendStatus() {
+  return invoke<EqBackendStatus>('get_eq_backend_status');
+}
+
+export function exportLinuxEqStatus() {
+  return invoke<EqBackendStatus>('export_linux_eq_status');
+}
+
+export function setupLinuxSystemEq() {
+  return invoke<EqBackendStatus>('setup_linux_system_eq');
 }
 
 export function setConfigPath(newPath: string) {
@@ -36,6 +59,22 @@ export function openLogsLocation() {
 
 export function loadPresets() {
   return invoke<PresetLibrary>('load_presets');
+}
+
+export function loadAutoEqIndex(forceRefresh = false) {
+  return invoke<AutoEqIndexEntry[]>('load_autoeq_index', { forceRefresh });
+}
+
+export function getAutoEqGraphicPreset(name: string, source: string) {
+  return invoke<string>('get_autoeq_graphic_preset', { name, source });
+}
+
+export function getAutoEqPresetVariant(
+  name: string,
+  source: string,
+  variant: AutoEqPresetVariant
+) {
+  return invoke<string>('get_autoeq_preset_variant', { name, source, variant });
 }
 
 export function applyPreset(group: string, name: string) {
@@ -152,6 +191,21 @@ export function onRuntimeSettingsUpdated(
   callback: (payload: AppRuntimeSettings) => void
 ) {
   return listen<AppRuntimeSettings>(SETTINGS_UPDATED_EVENT, (event) => {
+    callback(event.payload);
+  });
+}
+
+
+export function onOpenAboutRequested(callback: () => void) {
+  return listen<void>(OPEN_ABOUT_EVENT, () => {
+    callback();
+  });
+}
+
+export function onAutoEqProgress(
+  callback: (payload: AutoEqProgressPayload) => void
+) {
+  return listen<AutoEqProgressPayload>(AUTOEQ_PROGRESS_EVENT, (event) => {
     callback(event.payload);
   });
 }

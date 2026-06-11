@@ -15,8 +15,7 @@ async function refresh() {
 }
 
 async function runMutation(task: () => Promise<PresetLibrary>) {
-  await task();
-  const snapshot = await backend.rebuildTrayMenu();
+  const snapshot = await task();
   library.set(snapshot);
   return snapshot;
 }

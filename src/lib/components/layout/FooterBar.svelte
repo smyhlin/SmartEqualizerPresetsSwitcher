@@ -15,7 +15,8 @@
     onOpenLogs,
     onOpenTroubleshoot,
     onOpenAbout,
-    onAutorunToggle
+    onAutorunToggle,
+    showTroubleshoot = true
   } = $props<{
     statusMessage?: string;
     statusTone?: StatusTone;
@@ -27,6 +28,7 @@
     onOpenTroubleshoot?: () => void;
     onOpenAbout?: () => void;
     onAutorunToggle?: (event: Event) => void;
+    showTroubleshoot?: boolean;
   }>();
 
   function openLogs() {
@@ -84,7 +86,7 @@
       class={`inline-flex items-center gap-2 whitespace-nowrap leading-none ${
         autorunLoaded ? 'text-muted' : 'text-muted/70'
       }`}
-      title="Launch the app automatically when you sign in to Windows"
+      title="Launch the app automatically when you sign in"
     >
       <input
         type="checkbox"
@@ -93,20 +95,22 @@
         onchange={changeAutorun}
         class="focus-ring size-3.5 rounded-none border border-border bg-surface-2 accent-accent disabled:cursor-not-allowed disabled:opacity-60"
       />
-      <span>Launch on Windows startup</span>
+      <span>Start with login</span>
     </label>
   </div>
 
   <div class="flex shrink-0 items-center gap-2">
-    <Button
-      variant="ghost"
-      size="sm"
-      class="min-w-[124px] justify-start rounded-none border border-border/70 bg-transparent text-foreground shadow-none hover:bg-surface-2 hover:text-foreground"
-      onclick={openTroubleshoot}
-    >
-      <Wrench size={13} />
-      Troubleshoot
-    </Button>
+    {#if showTroubleshoot}
+      <Button
+        variant="ghost"
+        size="sm"
+        class="min-w-[124px] justify-start rounded-none border border-border/70 bg-transparent text-foreground shadow-none hover:bg-surface-2 hover:text-foreground"
+        onclick={openTroubleshoot}
+      >
+        <Wrench size={13} />
+        Windows APO
+      </Button>
+    {/if}
 
     <Button
       variant="ghost"

@@ -1,13 +1,13 @@
 [package]
-name = "smart_equalizer_apo_presets_manager"
-version = "0.2.0"
-description = "Tray-first Windows 11 preset manager for Equalizer APO."
+name = "smart_eq_preset_switcher"
+version = "0.3.0"
+description = "Cross-platform EQ preset switcher with Windows Equalizer APO and Linux PipeWire export support."
 authors = ["myhli"]
 license = "MIT"
 edition = "2021"
 
 [lib]
-name = "smart_equalizer_apo_presets_manager_lib"
+name = "smart_eq_preset_switcher_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -17,14 +17,21 @@ tauri-build = { version = "2.5.6", features = [] }
 base64 = "0.22.1"
 chrono = "0.4.42"
 dirs = "6.0.0"
+flate2 = "1.1.5"
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+tar = "0.4.44"
 tauri = { version = "2.10.3", features = ["tray-icon"] }
 tauri-plugin-dialog = "2.7.0"
 thiserror = "2.0.18"
 webbrowser = "1.0.6"
-winreg = "0.56.0"
+
+# Global desktop shortcut support for the tray-first GUI.
+tauri-plugin-global-shortcut = "2.3.1"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
-tauri-plugin-autostart = "2.5.1"
 tauri-plugin-single-instance = "2.4.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.56.0"

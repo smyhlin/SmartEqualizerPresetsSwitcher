@@ -10,8 +10,8 @@
   }>();
 
   const description =
-    'SmartEqualizer APO Presets Manager is a tray-first Windows 11 desktop app for organizing, editing, applying, importing, exporting, and backing up Equalizer APO presets. It is built with SvelteKit, TypeScript, Rust, and Tauri 2.';
-  const repositoryUrl = 'https://github.com/smyhlin/SmartEqualizerAPOPresetsManager';
+    'SmartEQPresetSwitcher is a cross-platform desktop app for organizing, editing, applying, importing, exporting, and backing up EQ presets. It supports Equalizer APO on Windows and Linux EQ export workflows such as PipeWire. It is built with SvelteKit, TypeScript, Rust, and Tauri 2.';
+  const repositoryUrl = 'https://github.com/smyhlin/SmartEQPresetSwitcher';
 
   function close() {
     onClose?.();
@@ -48,7 +48,7 @@
               <Info size={18} />
             </div>
             <div class="min-w-0">
-              <div class="text-sm font-semibold text-foreground">About SmartEqualizer APO</div>
+              <div class="text-sm font-semibold text-foreground">About SmartEQPresetSwitcher</div>
               <div class="mt-0.5 text-xs text-muted">Project details and source reference</div>
             </div>
           </div>

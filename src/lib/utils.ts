@@ -18,3 +18,13 @@ export function uniqueName(baseName: string, existingNames: string[]) {
 
   return `${normalized} ${suffix}`;
 }
+
+export function sanitizeImportName(name: string, fallback = 'Imported Preset') {
+  const cleaned = name
+    .replace(/[<>:"/\\|?*]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .join(' ');
+
+  return cleaned || fallback;
+}

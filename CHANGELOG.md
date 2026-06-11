@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0 - 2026-06-11
+
+### Added
+
+- Rebranded runtime/package naming to `SmartEQPresetSwitcher` with legacy folder migration.
+- Linux GUI, tray, TUI, boot-sync and native Arch package workflows.
+- EQ backend status panel for Windows Equalizer APO and Linux PipeWire/EasyEffects detection.
+- AutoEQ target selector with Auto, ParametricEQ / Filter and GraphicEQ import modes.
+- Linux PipeWire filter-chain export, PipeWire restart/routing helper, and GraphicEQ-to-parametric fallback conversion.
+- Bootstrap/build scripts for Linux, Windows, Arch packages, Debian packages and optional AppImage builds.
+
+### Changed
+
+- Arch build now uses `tauri build --no-bundle` plus `makepkg`, producing a real pacman-installable `.pkg.tar.zst`.
+- Linux packaged launcher forces conservative X11/XWayland WebKitGTK environment by default for KDE/Wayland/NVIDIA reliability.
+- Linux GUI starts with tray enabled again; `SMART_EQ_DISABLE_TRAY=1` disables it for troubleshooting.
+- Windows-only Equalizer APO repair controls are hidden on Linux.
+- Project hygiene checks distinguish developer mode from clean source packaging checks.
+
+### Fixed
+
+- Rust compile issues around mutable snapshots, private state calls and Tauri command registration.
+- AppImage/linuxdeploy no longer blocks the default Arch build path.
+- Packaged Arch binary no longer tries to load `localhost`; it embeds production frontend assets.
+- AutoEQ first-preview cache/download decode failures and stale variant handling.
+- Linux preset mutations no longer fail when tray refresh is unavailable.
+
 ## 0.2.0 - 2026-04-21
 
 ### Added

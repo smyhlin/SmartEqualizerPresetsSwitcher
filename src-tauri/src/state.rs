@@ -3,15 +3,17 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     sync::{Mutex, MutexGuard},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use tauri::Error as TauriError;
 use thiserror::Error;
+#[cfg(target_os = "windows")]
+use std::process::Command;
+// The Windows registry is only available on the Windows platform.
+#[cfg(target_os = "windows")]
 use winreg::{
     enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY},
     RegKey,
@@ -19,20 +21,27 @@ use winreg::{
 
 use crate::logging::append_log_line;
 
-pub const APP_FOLDER_NAME: &str = "SmartEqualizerAPO";
-pub const EVENT_PRESETS_UPDATED: &str = "smart-equalizer://presets-updated";
-pub const EVENT_SETTINGS_UPDATED: &str = "smart-equalizer://settings-updated";
+pub const APP_FOLDER_NAME: &str = "SmartEQPresetSwitcher";
+const LEGACY_APP_FOLDER_NAME: &str = "SmartEqualizerAPO";
+pub const EVENT_PRESETS_UPDATED: &str = "smart-eq://presets-updated";
+pub const EVENT_SETTINGS_UPDATED: &str = "smart-eq://settings-updated";
+pub const EVENT_OPEN_ABOUT_REQUESTED: &str = "smart-eq://open-about";
+#[cfg(target_os = "windows")]
 pub const REGISTRY_KEY_PATH: &str = r"SOFTWARE\EqualizerAPO";
+#[cfg(target_os = "windows")]
 pub const REGISTRY_VALUE_NAME: &str = "ConfigPath";
+#[cfg(target_os = "windows")]
 pub const REGISTRY_INSTALL_PATH_VALUE_NAME: &str = "InstallPath";
-const MANAGED_CONFIG_DIR_NAME: &str = "SmartEqualizerAPO";
+const MANAGED_CONFIG_DIR_NAME: &str = "SmartEQPresetSwitcher";
 const MANAGED_ACTIVE_PRESET_FILE_NAME: &str = "active-preset.txt";
-const MANAGED_BLOCK_START: &str = "# >>> SmartEqualizerAPOPresetsManager >>>";
-const MANAGED_BLOCK_END: &str = "# <<< SmartEqualizerAPOPresetsManager <<<";
+const MANAGED_BLOCK_START: &str = "# >>> SmartEQPresetSwitcher >>>";
+const MANAGED_BLOCK_END: &str = "# <<< SmartEQPresetSwitcher <<<";
+const LEGACY_MANAGED_BLOCK_START: &str = "# >>> SmartEqualizerAPOPresetsManager >>>";
+const LEGACY_MANAGED_BLOCK_END: &str = "# <<< SmartEqualizerAPOPresetsManager <<<";
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("AppData is unavailable on this system.")]
+    #[error("The per-user configuration directory is unavailable on this system.")]
     AppDataUnavailable,
     #[error("The tray icon was not initialized.")]
     MissingTray,
@@ -60,6 +69,8 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Reqwest(#[from] reqwest::Error),
     #[error(transparent)]
     Tauri(#[from] TauriError),
 }
@@ -172,9 +183,9 @@ pub struct AppStateInner {
 
 impl AppState {
     pub fn initialize() -> Result<Self, AppError> {
-        let app_data_dir = dirs::config_dir()
-            .ok_or(AppError::AppDataUnavailable)?
-            .join(APP_FOLDER_NAME);
+        let config_root = dirs::config_dir().ok_or(AppError::AppDataUnavailable)?;
+        let app_data_dir = config_root.join(APP_FOLDER_NAME);
+        migrate_legacy_app_data_dir(&config_root, &app_data_dir)?;
         let presets_dir = app_data_dir.join("presets");
         let metadata_path = app_data_dir.join("presets.json");
         let default_config_path = app_data_dir.join("config");
@@ -356,37 +367,69 @@ impl AppStateInner {
     }
 
     pub fn set_config_path(&mut self, new_path: PathBuf) -> Result<(), AppError> {
-        // Validate and normalize the path before proceeding
+        // Validate and normalize the path before proceeding.  This will
+        // ensure that Windows reserved characters are stripped and the
+        // resulting path is canonical.
         let normalized_path = validate_and_normalize_path(&new_path)?;
 
+        // Ensure the directory exists before attempting to set it.
         ensure_directory(&normalized_path)?;
 
-        match write_registry_config_path(&normalized_path) {
-            Ok(()) => {}
-            Err(error)
-                if error.kind() == std::io::ErrorKind::PermissionDenied
-                    || error.kind() == std::io::ErrorKind::Other =>
-            {
-                run_elevated_registry_helper(&normalized_path)?;
+        // On Windows we need to update the registry.  On other
+        // platforms this call is a no‑op because the helper is
+        // stubbed out.  The `cfg` block below contains the Windows
+        // implementation.  After this block executes the Windows
+        // registry should reflect our desired path.
+        #[cfg(target_os = "windows")]
+        {
+            match write_registry_config_path(&normalized_path) {
+                Ok(()) => {}
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        || error.kind() == std::io::ErrorKind::Other =>
+                {
+                    // The registry write failed due to insufficient
+                    // privileges.  Attempt to run the helper with
+                    // elevation.  If that fails the error will be
+                    // propagated.
+                    run_elevated_registry_helper(&normalized_path)?;
+                }
+                Err(error) => return Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
+
+            // Re-read the registry and normalize both paths for comparison.
+            let actual_config_path = normalize_path(&read_registry_config_path()?);
+            let expected_path = normalize_path(&normalized_path);
+
+            if actual_config_path != expected_path {
+                // The registry value differs from the requested path.
+                // Update our local state to match and surface an
+                // informative error.  This prevents silent
+                // inconsistencies when another process changes the
+                // registry between our write and read.
+                self.current_config_path = actual_config_path.clone();
+                return Err(AppError::Message(format!(
+                    "Equalizer APO ConfigPath was updated to '{}', but the requested path was '{}'. This may indicate another process modified the registry.",
+                    path_to_string(&actual_config_path),
+                    path_to_string(&normalized_path),
+                )));
+            }
+
+            // If the paths match, update our local state and write
+            // out the active configuration to disk.
+            self.current_config_path = actual_config_path;
+            return self.write_active_config();
         }
 
-        // Re-read registry and normalize both paths for comparison
-        let actual_config_path = normalize_path(&read_registry_config_path()?);
-        let expected_path = normalize_path(&normalized_path);
-        
-        if actual_config_path != expected_path {
-            self.current_config_path = actual_config_path.clone();
-            return Err(AppError::Message(format!(
-                "Equalizer APO ConfigPath was updated to '{}', but the requested path was '{}'. This may indicate another process modified the registry.",
-                path_to_string(&actual_config_path),
-                path_to_string(&normalized_path),
-            )));
+        // On non‑Windows platforms there is no registry to update.  We
+        // simply update the current configuration path and write the
+        // active configuration.  The write operation handles the
+        // managed preset logic.
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.current_config_path = normalized_path;
+            return self.write_active_config();
         }
-
-        self.current_config_path = actual_config_path;
-        self.write_active_config()
     }
 
     pub fn create_group(&mut self, name: &str) -> Result<(), AppError> {
@@ -499,7 +542,9 @@ impl AppStateInner {
             .ok_or_else(|| AppError::GroupNotFound(group_name.to_string()))?;
 
         if self.preset_index(group_index, &preset_name).is_some() {
-            return Err(AppError::AlreadyExists(format!("{group_name}/{preset_name}")));
+            return Err(AppError::AlreadyExists(format!(
+                "{group_name}/{preset_name}"
+            )));
         }
 
         let order = self.metadata.groups[group_index].presets.len();
@@ -508,10 +553,12 @@ impl AppStateInner {
             content.unwrap_or_default().as_str(),
         )?;
 
-        self.metadata.groups[group_index].presets.push(PresetMetadata {
-            name: preset_name,
-            order,
-        });
+        self.metadata.groups[group_index]
+            .presets
+            .push(PresetMetadata {
+                name: preset_name,
+                order,
+            });
         self.reindex_orders();
         self.persist_metadata()
     }
@@ -527,17 +574,17 @@ impl AppStateInner {
             .group_index(group_name)
             .ok_or_else(|| AppError::GroupNotFound(group_name.to_string()))?;
 
-        let active_before_change = self.metadata.groups[group_index]
-            .active_preset
-            .as_deref()
+        let active_before_change = self.metadata.groups[group_index].active_preset.as_deref()
             == Some(preset_name.as_str());
         let order = self.metadata.groups[group_index].presets.len();
         write_text_file_atomically(&self.preset_path(group_name, &preset_name), content)?;
         if self.preset_index(group_index, &preset_name).is_none() {
-            self.metadata.groups[group_index].presets.push(PresetMetadata {
-                name: preset_name,
-                order,
-            });
+            self.metadata.groups[group_index]
+                .presets
+                .push(PresetMetadata {
+                    name: preset_name,
+                    order,
+                });
         }
 
         self.reindex_orders();
@@ -558,12 +605,12 @@ impl AppStateInner {
         let group_index = self
             .group_index(group_name)
             .ok_or_else(|| AppError::GroupNotFound(group_name.to_string()))?;
-        let preset_index = self
-            .preset_index(group_index, old_name)
-            .ok_or_else(|| AppError::PresetNotFound {
-                group: group_name.to_string(),
-                name: old_name.to_string(),
-            })?;
+        let preset_index =
+            self.preset_index(group_index, old_name)
+                .ok_or_else(|| AppError::PresetNotFound {
+                    group: group_name.to_string(),
+                    name: old_name.to_string(),
+                })?;
 
         if self.preset_index(group_index, &new_name).is_some() {
             return Err(AppError::AlreadyExists(format!("{group_name}/{new_name}")));
@@ -579,7 +626,8 @@ impl AppStateInner {
         fs::rename(&old_preset_path, &new_preset_path)?;
         if had_convolution_copy {
             fs::rename(&old_convolution_path, &new_convolution_path)?;
-            let updated_content = replace_convolution_path(&existing_content, &new_convolution_path);
+            let updated_content =
+                replace_convolution_path(&existing_content, &new_convolution_path);
             write_text_file_atomically(&new_preset_path, updated_content.as_str())?;
         }
 
@@ -596,12 +644,12 @@ impl AppStateInner {
         let group_index = self
             .group_index(group_name)
             .ok_or_else(|| AppError::GroupNotFound(group_name.to_string()))?;
-        let preset_index = self
-            .preset_index(group_index, preset_name)
-            .ok_or_else(|| AppError::PresetNotFound {
+        let preset_index = self.preset_index(group_index, preset_name).ok_or_else(|| {
+            AppError::PresetNotFound {
                 group: group_name.to_string(),
                 name: preset_name.to_string(),
-            })?;
+            }
+        })?;
 
         let preset_path = self.preset_path(group_name, preset_name);
         let convolution_path = self.preset_convolution_path(group_name, preset_name);
@@ -612,7 +660,9 @@ impl AppStateInner {
             fs::remove_file(convolution_path)?;
         }
 
-        self.metadata.groups[group_index].presets.remove(preset_index);
+        self.metadata.groups[group_index]
+            .presets
+            .remove(preset_index);
         if self.metadata.groups[group_index].active_preset.as_deref() == Some(preset_name) {
             self.metadata.groups[group_index].active_preset = None;
         }
@@ -642,7 +692,9 @@ impl AppStateInner {
                 name: preset_name.to_string(),
             })?;
 
-        let preset_metadata = self.metadata.groups[old_group_index].presets.remove(preset_index);
+        let preset_metadata = self.metadata.groups[old_group_index]
+            .presets
+            .remove(preset_index);
         let old_preset_path = self.preset_path(old_group_name, preset_name);
         let new_preset_path = self.preset_path(new_group_name, preset_name);
         let old_convolution_path = self.preset_convolution_path(old_group_name, preset_name);
@@ -656,13 +708,16 @@ impl AppStateInner {
 
         if old_group_name != new_group_name {
             if new_preset_path.exists() {
-                return Err(AppError::AlreadyExists(format!("{new_group_name}/{preset_name}")));
+                return Err(AppError::AlreadyExists(format!(
+                    "{new_group_name}/{preset_name}"
+                )));
             }
 
             fs::rename(&old_preset_path, &new_preset_path)?;
             if had_convolution_copy {
                 fs::rename(&old_convolution_path, &new_convolution_path)?;
-                let updated_content = replace_convolution_path(&existing_content, &new_convolution_path);
+                let updated_content =
+                    replace_convolution_path(&existing_content, &new_convolution_path);
                 write_text_file_atomically(&new_preset_path, updated_content.as_str())?;
             }
             if was_active {
@@ -671,7 +726,8 @@ impl AppStateInner {
             }
         }
 
-        let mut target_slot = target_index.unwrap_or(self.metadata.groups[new_group_index].presets.len());
+        let mut target_slot =
+            target_index.unwrap_or(self.metadata.groups[new_group_index].presets.len());
         if old_group_name == new_group_name && preset_index < target_slot {
             target_slot = target_slot.saturating_sub(1);
         }
@@ -785,14 +841,12 @@ impl AppStateInner {
                     if let Some(bytes) = restored_bytes {
                         let staged_convolution_path = group_dir.join(format!("{preset_name}.wav"));
                         write_binary_file_atomically(&staged_convolution_path, bytes.as_slice())?;
-                        content_to_write = replace_convolution_path(&content_to_write, &convolution_path);
+                        content_to_write =
+                            replace_convolution_path(&content_to_write, &convolution_path);
                     }
                 }
 
-                write_text_file_atomically(
-                    &preset_path,
-                    content_to_write.as_str(),
-                )?;
+                write_text_file_atomically(&preset_path, content_to_write.as_str())?;
             }
         }
 
@@ -872,10 +926,12 @@ impl AppStateInner {
             )?;
 
             let order = self.metadata.groups[group_index].presets.len();
-            self.metadata.groups[group_index].presets.push(PresetMetadata {
-                name: unique_name,
-                order,
-            });
+            self.metadata.groups[group_index]
+                .presets
+                .push(PresetMetadata {
+                    name: unique_name,
+                    order,
+                });
         }
 
         self.reindex_orders();
@@ -915,7 +971,10 @@ impl AppStateInner {
         }
 
         let updated_content = replace_convolution_path(content, &convolution_path);
-        write_text_file_atomically(&self.preset_path(group_name, preset_name), updated_content.as_str())?;
+        write_text_file_atomically(
+            &self.preset_path(group_name, preset_name),
+            updated_content.as_str(),
+        )?;
         self.persist_metadata()?;
         self.write_active_config()
     }
@@ -941,7 +1000,10 @@ impl AppStateInner {
         if convolution_path.exists() {
             fs::remove_file(convolution_path)?;
         }
-        write_text_file_atomically(&self.preset_path(group_name, preset_name), updated_content.as_str())?;
+        write_text_file_atomically(
+            &self.preset_path(group_name, preset_name),
+            updated_content.as_str(),
+        )?;
         self.persist_metadata()?;
         self.write_active_config()
     }
@@ -983,7 +1045,11 @@ impl AppStateInner {
 
         let mut rebuilt_groups = Vec::new();
         for (group_order, group_name) in ordered_groups.iter().enumerate() {
-            let old_group = self.metadata.groups.iter().find(|group| group.name == *group_name);
+            let old_group = self
+                .metadata
+                .groups
+                .iter()
+                .find(|group| group.name == *group_name);
             let disk_presets = list_preset_names(&self.group_path(group_name))?;
             let mut ordered_presets = Vec::new();
 
@@ -1042,7 +1108,7 @@ impl AppStateInner {
         }
     }
 
-    fn write_active_config(&mut self) -> Result<(), AppError> {
+    pub(crate) fn write_active_config(&mut self) -> Result<(), AppError> {
         let config_txt_path = self.current_config_path.join("config.txt");
         let managed_preset_path = self.managed_live_preset_path();
         let managed_preset_payload = self.build_managed_preset_payload()?;
@@ -1065,7 +1131,10 @@ impl AppStateInner {
     }
 
     fn group_index(&self, name: &str) -> Option<usize> {
-        self.metadata.groups.iter().position(|group| group.name == name)
+        self.metadata
+            .groups
+            .iter()
+            .position(|group| group.name == name)
     }
 
     fn preset_index(&self, group_index: usize, name: &str) -> Option<usize> {
@@ -1080,7 +1149,8 @@ impl AppStateInner {
     }
 
     fn preset_path(&self, group_name: &str, preset_name: &str) -> PathBuf {
-        self.group_path(group_name).join(format!("{preset_name}.txt"))
+        self.group_path(group_name)
+            .join(format!("{preset_name}.txt"))
     }
 
     fn unique_preset_name(&self, group_index: usize, base_name: &str) -> String {
@@ -1154,17 +1224,17 @@ impl AppStateInner {
             if active_path.exists() {
                 let preset_content = fs::read_to_string(active_path)?;
                 format!(
-                    "# Generated by SmartEqualizerAPOPresetsManager\r\n# Active preset: {} / {}\r\n\r\n{}",
+                    "# Generated by SmartEQPresetSwitcher\r\n# Active preset: {} / {}\r\n\r\n{}",
                     group_name,
                     preset_name,
                     normalize_windows_newlines(preset_content.as_str()),
                 )
             } else {
-                "# Generated by SmartEqualizerAPOPresetsManager\r\n# No active preset selected.\r\n"
+                "# Generated by SmartEQPresetSwitcher\r\n# No active preset selected.\r\n"
                     .to_string()
             }
         } else {
-            "# Generated by SmartEqualizerAPOPresetsManager\r\n# No active preset selected.\r\n"
+            "# Generated by SmartEQPresetSwitcher\r\n# No active preset selected.\r\n"
                 .to_string()
         };
 
@@ -1186,13 +1256,21 @@ impl AppStateInner {
         ) {
             Ok(()) => Ok(()),
             Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                run_elevated_live_config_helper(
-                    &self.app_data_dir,
-                    config_txt_path,
-                    config_txt_content,
-                    managed_preset_path,
-                    managed_preset_content,
-                )
+                #[cfg(target_os = "windows")]
+                {
+                    return run_elevated_live_config_helper(
+                        &self.app_data_dir,
+                        config_txt_path,
+                        config_txt_content,
+                        managed_preset_path,
+                        managed_preset_content,
+                    );
+                }
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Err(AppError::Io(error))
+                }
             }
             Err(error) => Err(error),
         }
@@ -1249,6 +1327,55 @@ pub fn try_handle_cli_mode() -> Option<i32> {
     }
 }
 
+fn migrate_legacy_app_data_dir(config_root: &Path, app_data_dir: &Path) -> Result<(), AppError> {
+    let legacy_dir = config_root.join(LEGACY_APP_FOLDER_NAME);
+    if app_data_dir.exists() || !legacy_dir.exists() {
+        return Ok(());
+    }
+
+    match fs::rename(&legacy_dir, app_data_dir) {
+        Ok(()) => {
+            append_log_line(
+                "INFO",
+                format!(
+                    "Migrated legacy app data from '{}' to '{}'.",
+                    legacy_dir.display(),
+                    app_data_dir.display()
+                ),
+            );
+            Ok(())
+        }
+        Err(rename_error) => {
+            append_log_line(
+                "WARN",
+                format!(
+                    "Unable to rename legacy app data directory, trying recursive copy instead: {rename_error}"
+                ),
+            );
+            copy_dir_recursive(&legacy_dir, app_data_dir)?;
+            Ok(())
+        }
+    }
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), AppError> {
+    ensure_directory(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir_recursive(&source_path, &target_path)?;
+        } else {
+            if let Some(parent) = target_path.parent() {
+                ensure_directory(parent)?;
+            }
+            fs::copy(&source_path, &target_path)?;
+        }
+    }
+    Ok(())
+}
+
 fn load_metadata(metadata_path: &Path) -> Result<PresetsMetadata, AppError> {
     if !metadata_path.exists() {
         return Ok(PresetsMetadata::default());
@@ -1258,6 +1385,7 @@ fn load_metadata(metadata_path: &Path) -> Result<PresetsMetadata, AppError> {
     Ok(serde_json::from_str(&payload)?)
 }
 
+#[cfg(target_os = "windows")]
 fn read_registry_config_path() -> Result<PathBuf, AppError> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let key = hklm.open_subkey_with_flags(REGISTRY_KEY_PATH, KEY_READ | KEY_WOW64_64KEY)?;
@@ -1273,6 +1401,7 @@ fn detect_installed_config_path() -> Option<PathBuf> {
     config_path.exists().then_some(config_path)
 }
 
+#[cfg(target_os = "windows")]
 pub(crate) fn detect_installed_install_path() -> Option<PathBuf> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let key = hklm
@@ -1282,6 +1411,7 @@ pub(crate) fn detect_installed_install_path() -> Option<PathBuf> {
     Some(PathBuf::from(install_path))
 }
 
+#[cfg(target_os = "windows")]
 fn write_registry_config_path(path: &Path) -> Result<(), std::io::Error> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let key = hklm.open_subkey_with_flags(REGISTRY_KEY_PATH, KEY_SET_VALUE | KEY_WOW64_64KEY)?;
@@ -1289,6 +1419,7 @@ fn write_registry_config_path(path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
 fn run_elevated_registry_helper(path: &Path) -> Result<(), AppError> {
     run_elevated_cli(&[
         "--elevated-set-config-path".to_string(),
@@ -1296,6 +1427,10 @@ fn run_elevated_registry_helper(path: &Path) -> Result<(), AppError> {
     ])
 }
 
+#[cfg(target_os = "windows")]
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(target_os = "windows")]
 fn run_elevated_live_config_helper(
     app_data_dir: &Path,
     config_txt_path: &Path,
@@ -1326,6 +1461,30 @@ fn run_elevated_live_config_helper(
     result
 }
 
+// The following stub implementations provide non‑Windows platforms with
+// fallbacks for registry and elevation helpers.  They either
+// silently no‑op or return sensible errors.  See the Windows
+// versions above for the actual implementations.
+
+#[cfg(not(target_os = "windows"))]
+fn read_registry_config_path() -> Result<PathBuf, AppError> {
+    Err(AppError::RegistryValueMissing)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn detect_installed_install_path() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn write_registry_config_path(_path: &Path) -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Windows registry config path is not supported on this platform.",
+    ))
+}
+
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn classify_elevation_failure(
     exit_code: Option<i32>,
     stdout: &str,
@@ -1343,6 +1502,7 @@ pub(crate) fn classify_elevation_failure(
     AppError::Message(fallback_message)
 }
 
+#[cfg(target_os = "windows")]
 pub(crate) fn run_elevated_process(file_path: &Path, arguments: &[String]) -> Result<(), AppError> {
     let escaped_arguments = arguments
         .iter()
@@ -1405,11 +1565,13 @@ pub(crate) fn run_elevated_process(file_path: &Path, arguments: &[String]) -> Re
     ))
 }
 
+#[cfg(target_os = "windows")]
 fn run_elevated_cli(arguments: &[String]) -> Result<(), AppError> {
     let current_exe = env::current_exe()?;
     run_elevated_process(current_exe.as_path(), arguments)
 }
 
+#[cfg(target_os = "windows")]
 fn write_elevated_live_config(
     staged_config_path: &Path,
     config_txt_path: &Path,
@@ -1424,6 +1586,18 @@ fn write_elevated_live_config(
         managed_preset_path,
         preset_content.as_str(),
     )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn write_elevated_live_config(
+    _staged_config_path: &Path,
+    _config_txt_path: &Path,
+    _staged_preset_path: &Path,
+    _managed_preset_path: &Path,
+) -> Result<(), AppError> {
+    Err(AppError::Message(
+        "Elevated live config writes are only supported on Windows.".to_string(),
+    ))
 }
 
 fn list_group_names(presets_dir: &Path) -> Result<Vec<String>, AppError> {
@@ -1463,13 +1637,16 @@ fn validate_name(name: &str) -> Result<String, AppError> {
     }
 
     let invalid = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
-    if trimmed.chars().any(|character| invalid.contains(&character)) {
+    if trimmed
+        .chars()
+        .any(|character| invalid.contains(&character))
+    {
         return Err(AppError::InvalidName(trimmed.to_string()));
     }
 
     let reserved = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     if reserved
         .iter()
@@ -1585,7 +1762,9 @@ fn strip_wrapping_quotes(value: &str) -> String {
     if (trimmed.starts_with('"') && trimmed.ends_with('"'))
         || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
     {
-        trimmed[1..trimmed.len().saturating_sub(1)].trim().to_string()
+        trimmed[1..trimmed.len().saturating_sub(1)]
+            .trim()
+            .to_string()
     } else {
         trimmed.to_string()
     }
@@ -1672,11 +1851,15 @@ fn validate_and_normalize_path(path: &Path) -> Result<PathBuf, AppError> {
 
     // Must have a valid extension or be a directory path
     let normalized = normalize_path(path);
-    
+
     // Check that path doesn't contain invalid characters for Windows
     let path_str = path_to_string(&normalized);
-    if path_str.contains('<') || path_str.contains('>') || path_str.contains('|') 
-        || path_str.contains('?') || path_str.contains('*') {
+    if path_str.contains('<')
+        || path_str.contains('>')
+        || path_str.contains('|')
+        || path_str.contains('?')
+        || path_str.contains('*')
+    {
         return Err(AppError::Message(
             "Config path contains invalid characters".to_string(),
         ));
@@ -1689,12 +1872,12 @@ fn validate_and_normalize_path(path: &Path) -> Result<PathBuf, AppError> {
 fn normalize_path(path: &Path) -> PathBuf {
     // Convert to string and clean up
     let mut path_str = path.to_string_lossy().to_string();
-    
+
     // Remove trailing slashes/backslashes
     while path_str.ends_with('\\') || path_str.ends_with('/') {
         path_str.pop();
     }
-    
+
     PathBuf::from(path_str)
 }
 
@@ -1768,10 +1951,9 @@ fn build_config_with_managed_include(existing_config: &str, include_path: &str) 
     let normalized_existing = normalize_windows_newlines(existing_config);
     let normalized_block = normalize_windows_newlines(managed_block.as_str());
 
-    if let Some(updated) = replace_existing_managed_block(
-        normalized_existing.as_str(),
-        normalized_block.as_str(),
-    ) {
+    if let Some(updated) =
+        replace_existing_managed_block(normalized_existing.as_str(), normalized_block.as_str())
+    {
         return ensure_trailing_newline(updated.as_str());
     }
 
@@ -1785,9 +1967,15 @@ fn build_config_with_managed_include(existing_config: &str, include_path: &str) 
 }
 
 fn replace_existing_managed_block(existing_config: &str, managed_block: &str) -> Option<String> {
-    // Only check if the managed block markers exist. If they do, replace the
-    // entire config with just the managed block (no surrounding content preserved).
-    if existing_config.find(MANAGED_BLOCK_START).is_some() {
+    // If the managed block markers exist, replace the entire managed config
+    // block with the current brand marker.  Old SmartEqualizerAPOPresetsManager
+    // markers are intentionally supported so existing user configs migrate
+    // cleanly.
+    if existing_config.find(MANAGED_BLOCK_START).is_some()
+        || existing_config.find(MANAGED_BLOCK_END).is_some()
+        || existing_config.find(LEGACY_MANAGED_BLOCK_START).is_some()
+        || existing_config.find(LEGACY_MANAGED_BLOCK_END).is_some()
+    {
         Some(managed_block.to_string())
     } else {
         None
@@ -1796,12 +1984,17 @@ fn replace_existing_managed_block(existing_config: &str, managed_block: &str) ->
 
 fn is_legacy_managed_config(existing_config: &str) -> bool {
     let trimmed = existing_config.trim();
-    trimmed.starts_with("# SmartEqualizerAPOPresetsManager")
-        && (trimmed.contains("# Active preset:") || trimmed.contains("# No active preset selected."))
+    (trimmed.starts_with("# SmartEQPresetSwitcher")
+        || trimmed.starts_with("# SmartEqualizerAPOPresetsManager"))
+        && (trimmed.contains("# Active preset:")
+            || trimmed.contains("# No active preset selected."))
 }
 
 fn normalize_windows_newlines(value: &str) -> String {
-    value.replace("\r\n", "\n").replace('\r', "\n").replace('\n', "\r\n")
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\r\n")
 }
 
 fn ensure_trailing_newline(value: &str) -> String {
@@ -1859,10 +2052,12 @@ fn relative_path(from_dir: &Path, target: &Path) -> Option<PathBuf> {
     Some(relative)
 }
 
+#[cfg(target_os = "windows")]
 fn escape_for_powershell(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn combine_shell_output(stdout: &str, stderr: &str) -> Option<String> {
     let mut parts = Vec::new();
     let stderr = stderr.trim();
@@ -1882,6 +2077,7 @@ fn combine_shell_output(stdout: &str, stderr: &str) -> Option<String> {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn is_user_declined_elevation(exit_code: Option<i32>, stdout: &str, stderr: &str) -> bool {
     if exit_code == Some(1223) {
         return true;
