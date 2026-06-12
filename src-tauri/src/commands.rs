@@ -315,7 +315,7 @@ fn linux_detected_backend() -> (String, String) {
 }
 
 #[cfg(target_os = "linux")]
-fn restart_linux_audio_services() -> Result<(), AppError> {
+pub(crate) fn restart_linux_audio_services() -> Result<(), AppError> {
     let command = linux_restart_command();
     append_log_line("INFO", format!("Running Linux EQ setup command: {command}"));
     let output = Command::new("systemctl")
@@ -362,7 +362,7 @@ fn restart_linux_audio_services() -> Result<(), AppError> {
 
 
 #[cfg(target_os = "linux")]
-fn route_linux_audio_to_eq_sink() -> Result<(), AppError> {
+pub(crate) fn route_linux_audio_to_eq_sink() -> Result<(), AppError> {
     if !command_available("pactl") {
         append_log_line(
             "INFO",

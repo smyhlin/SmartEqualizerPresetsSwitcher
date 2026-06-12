@@ -25,7 +25,8 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use crate::{
     commands::{
         apply_preset, attach_convolution_wav, create_group, create_preset, delete_group,
-        delete_preset, export_app_settings, export_preset, get_autoeq_graphic_preset, get_autoeq_preset_variant,
+        delete_preset, disable_eq, export_app_settings, export_preset,
+        get_autoeq_graphic_preset, get_autoeq_preset_variant,
         get_autorun_enabled, get_config_path, import_app_settings, import_presets,
         export_linux_eq_status, get_eq_backend_status, install_or_reinstall_apo, load_autoeq_index, load_logs, load_presets, move_preset, setup_linux_system_eq,
         open_apo_device_selector, open_logs_location, open_repository_url, rebuild_tray_menu,
@@ -46,6 +47,7 @@ const MENU_ID_MANAGE: &str = "menu.manage";
 const MENU_ID_AUTORUN: &str = "menu.autorun";
 const MENU_ID_ABOUT: &str = "menu.about";
 const MENU_ID_EXIT: &str = "menu.exit";
+const MENU_ID_DISABLE_EQ: &str = "menu.disable_eq";
 const MENU_ID_EMPTY_GROUPS: &str = "menu.empty-groups";
 const MENU_ID_EMPTY_PRESETS_PREFIX: &str = "menu.empty-presets";
 
@@ -204,6 +206,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            disable_eq,
             get_config_path,
             get_eq_backend_status,
             export_linux_eq_status,
@@ -492,6 +495,20 @@ fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, event: tauri::menu::Me
             app.exit(0);
             Ok(())
         }
+        MENU_ID_DISABLE_EQ => {
+            let set_result = (|| -> Result<(), AppError> {
+                let state: State<'_, AppState> = app.state();
+                let mut guard = state.lock()?;
+                guard.set_eq_disabled(true)
+            })();
+            if let Err(e) = set_result {
+                append_log_line("ERROR", format!("Failed to disable EQ via tray: {e}"));
+            }
+            #[cfg(target_os = "linux")]
+            commands::disable_linux_eq();
+            let _ = refresh_runtime(app);
+            Ok(())
+        }
         item_id => apply_from_tray(app, item_id),
     };
 
@@ -523,6 +540,25 @@ fn apply_from_tray<R: Runtime>(app: &AppHandle<R>, item_id: &str) -> Result<(), 
         let state: State<'_, AppState> = app.state();
         let mut guard = state.lock()?;
         guard.apply_preset(&selection.group, &selection.preset)?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        match crate::linux_eq::export_active_preset() {
+            Ok(()) => {
+                if let Err(error) = crate::commands::restart_linux_audio_services() {
+                    crate::logging::append_log_line(
+                        "WARN",
+                        format!("Linux EQ was exported after tray apply, but audio service reload failed: {error}"),
+                    );
+                } else if let Err(error) = crate::commands::route_linux_audio_to_eq_sink() {
+                    crate::logging::append_log_line("WARN", format!("Linux EQ was exported after tray apply, but routing failed: {error}"));
+                }
+            }
+            Err(error) => {
+                crate::logging::append_log_line("WARN", format!("Linux EQ export after tray apply failed: {error}"));
+            }
+        }
     }
 
     let _ = refresh_runtime(app)?;
@@ -559,6 +595,20 @@ fn construct_tray_menu<R: Runtime>(app: &AppHandle<R>) -> Result<Menu<R>, AppErr
     let autorun_item = CheckMenuItemBuilder::with_id(MENU_ID_AUTORUN, "Start with login")
         .checked(autorun_enabled)
         .build(app)?;
+
+    let eq_disabled = {
+        let state: State<'_, AppState> = app.state();
+        let guard = state.lock()?;
+        guard.is_eq_disabled()
+    };
+    let disable_eq_item = if eq_disabled {
+        MenuItemBuilder::with_id(MENU_ID_DISABLE_EQ, "EQ: Bypassed")
+            .enabled(false)
+            .build(app)?
+    } else {
+        MenuItemBuilder::with_id(MENU_ID_DISABLE_EQ, "Bypass EQ").build(app)?
+    };
+
     let about_item = MenuItemBuilder::with_id(MENU_ID_ABOUT, "About...").build(app)?;
     let exit_item = MenuItemBuilder::with_id(MENU_ID_EXIT, "Exit").build(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
@@ -568,6 +618,7 @@ fn construct_tray_menu<R: Runtime>(app: &AppHandle<R>) -> Result<Menu<R>, AppErr
             &presets_submenu,
             &manage_item,
             &autorun_item,
+            &disable_eq_item,
             &separator,
             &about_item,
             &exit_item,
