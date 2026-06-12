@@ -5,13 +5,17 @@ SmartEQPresetSwitcher is a cross-platform EQ preset switcher for managing, editi
 On Windows it integrates with Equalizer APO, can install or repair it, and can open the official Device Selector. On Linux it provides GUI, tray, TUI, boot-sync and Linux EQ export workflows for PipeWire-oriented systems.
 
 ---
-<img width="1610" height="903" alt="image" src="https://github.com/user-attachments/assets/5067d285-3f1b-4a7e-a834-e00f6468451f" />
-
----
-<img width="1011" height="183" alt="{543C6396-6142-49DF-8CCE-04A829D97903}" src="https://github.com/user-attachments/assets/7a27512b-e538-4497-9501-e190fe38c456" />
+<img alt="GUI screenshot" src="assets/GUI.webp" />
 
 ---
 
+<img alt="TUI screenshot" src="assets/tui.webp" />
+
+---
+
+<img alt="Tray screenshot" src="assets/tray.webp" />
+
+---
 
 ## Release state
 
