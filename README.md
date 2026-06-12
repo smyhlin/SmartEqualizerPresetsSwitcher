@@ -1,14 +1,33 @@
 # SmartEQPresetSwitcher
 
 SmartEQPresetSwitcher is a cross-platform EQ preset switcher for managing, editing, applying, importing, exporting and backing up EQ presets. It is built with SvelteKit, TypeScript, Rust and Tauri 2.
-
 Windows uses Equalizer APO as the real system backend. Linux uses a PipeWire-oriented compatibility path: presets are exported to app-managed EQ files and the app can generate a PipeWire filter-chain setup for system-wide routing.
 
 ---
-<img width="1610" height="903" alt="SmartEQPresetSwitcher main window" src="https://github.com/user-attachments/assets/5067d285-3f1b-4a7e-a834-e00f6468451f" />
+
+## Screenshots
+
+### Main window
+
+<img width="1610" height="903" alt="SmartEQPresetSwitcher main window" src="assets/pasted%20file.webp" />
+
+Preset library with groups, active preset, editor and EQ backend status.
 
 ---
-<img width="1011" height="183" alt="SmartEQPresetSwitcher tray/status preview" src="https://github.com/user-attachments/assets/7a27512b-e538-4497-9501-e190fe38c456" />
+
+### Tray menu
+
+<img width="1011" height="183" alt="SmartEQPresetSwitcher tray/status preview" src="assets/tray.webp" />
+
+Quick preset switching and bypass controls from the system tray.
+
+---
+
+### Terminal UI
+
+<img width="800" height="600" alt="SmartEQPresetSwitcher TUI" src="assets/tui.webp" />
+
+Full TUI mode for headless and boot-sync workflows.
 
 ---
 
