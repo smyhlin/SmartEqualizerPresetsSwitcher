@@ -95,6 +95,7 @@ pub struct PresetLibrary {
     pub groups: Vec<PresetGroup>,
     pub needs_config_migration: bool,
     pub config_path_prompted: bool,
+    pub eq_disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -137,6 +138,8 @@ pub struct PresetConvolution {
 pub struct PresetsMetadata {
     #[serde(default)]
     pub config_path_prompted: bool,
+    #[serde(default)]
+    pub eq_disabled: bool,
     #[serde(default)]
     pub groups: Vec<GroupMetadata>,
 }
@@ -282,6 +285,7 @@ impl AppStateInner {
             groups,
             needs_config_migration: !self.is_config_path_writable()?,
             config_path_prompted: self.metadata.config_path_prompted,
+            eq_disabled: self.metadata.eq_disabled,
         })
     }
 
@@ -889,6 +893,7 @@ impl AppStateInner {
 
         self.clear_active_selection();
         self.metadata.groups[group_index].active_preset = Some(preset_name.to_string());
+        self.metadata.eq_disabled = false;
         self.persist_metadata()?;
         self.write_active_config()
     }
@@ -1185,6 +1190,18 @@ impl AppStateInner {
                 }
             }
         }
+    }
+
+    pub fn is_eq_disabled(&self) -> bool {
+        self.metadata.eq_disabled
+    }
+
+    pub fn set_eq_disabled(&mut self, disabled: bool) -> Result<(), AppError> {
+        self.metadata.eq_disabled = disabled;
+        if disabled {
+            self.clear_active_selection();
+        }
+        self.persist_metadata()
     }
 
     fn active_selection(&self) -> Option<(String, String)> {
