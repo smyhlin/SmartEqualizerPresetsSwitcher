@@ -41,8 +41,8 @@ Other options:
 
 Outputs:
   dist/arch/*.pkg.tar.zst
-  src-tauri/target/release/bundle/deb/*.deb
-  src-tauri/target/release/bundle/appimage/*.AppImage
+  bundle/deb/*.deb       (under the Cargo target directory)
+  bundle/appimage/*.AppImage
 USAGE
       exit 0
       ;;
@@ -54,6 +54,24 @@ info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+target_root() {
+  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+    printf '%s\n' "$CARGO_TARGET_DIR"
+    return
+  fi
+  for candidate in \
+    "$ROOT_DIR/src-tauri/target" \
+    "$ROOT_DIR/.cargo-target" \
+    "$ROOT_DIR/../.cargo-target"
+  do
+    if [[ -d "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf '%s\n' "$ROOT_DIR/src-tauri/target"
+}
 
 is_arch_like() {
   [[ -f /etc/arch-release ]] || have pacman
@@ -84,15 +102,16 @@ fi
 
 if [[ "$CLEAN" -eq 1 ]]; then
   info "Cleaning build outputs."
-  rm -rf build .svelte-kit dist/arch src-tauri/target/release/bundle
+  TARGET_DIR="$(target_root)"
+  rm -rf build .svelte-kit dist/arch "$TARGET_DIR/release/bundle"
 fi
 
 if [[ "$RUN_BOOTSTRAP" -eq 1 ]]; then
   info "Running Linux bootstrap."
   if [[ "$RUN_CHECK" -eq 1 ]]; then
-    scripts/bootstrap-linux.sh
+    "$ROOT_DIR/scripts/bootstrap-linux.sh"
   else
-    scripts/bootstrap-linux.sh --skip-check
+    "$ROOT_DIR/scripts/bootstrap-linux.sh" --skip-check
   fi
 else
   info "Skipping bootstrap."
@@ -110,7 +129,7 @@ case "$MODE" in
     # repeat the same Svelte/project check inside the delegated Arch builder.
     args=(--skip-bootstrap --skip-check)
     [[ "$CLEAN" -eq 1 ]] && args+=(--clean)
-    scripts/build-arch-package.sh "${args[@]}"
+    "$ROOT_DIR/scripts/build-arch-package.sh" "${args[@]}"
     info "Build artifacts:"
     find dist/arch -type f -name '*.pkg.tar.zst' -print | sort || true
     ;;
@@ -121,7 +140,8 @@ case "$MODE" in
     info "Building Debian package."
     npm run tauri -- build --bundles deb
     info "Build artifacts:"
-    find src-tauri/target/release/bundle/deb -type f -name '*.deb' -print | sort || true
+    TARGET_DIR="$(target_root)"
+    find "$TARGET_DIR/release/bundle/deb" -type f -name '*.deb' -print | sort || true
     ;;
   appimage)
     warn "AppImage bundling uses Tauri/linuxdeploy and can fail on some distro/runtime combinations."
@@ -129,7 +149,8 @@ case "$MODE" in
     info "Building AppImage."
     npm run tauri -- build --bundles appimage
     info "Build artifacts:"
-    find src-tauri/target/release/bundle/appimage -type f -name '*.AppImage' -print | sort || true
+    TARGET_DIR="$(target_root)"
+    find "$TARGET_DIR/release/bundle/appimage" -type f -name '*.AppImage' -print | sort || true
     ;;
   deb,appimage|appimage,deb)
     if ! have dpkg-deb; then
@@ -139,7 +160,8 @@ case "$MODE" in
     info "Building Debian package and AppImage."
     npm run tauri -- build --bundles deb,appimage
     info "Build artifacts:"
-    find src-tauri/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' \) -print | sort || true
+    TARGET_DIR="$(target_root)"
+    find "$TARGET_DIR/release/bundle" -type f \( -name '*.AppImage' -o -name '*.deb' \) -print | sort || true
     ;;
   *)
     fail "Unsupported build mode: $MODE"

@@ -36,6 +36,24 @@ info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+target_root() {
+  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+    printf '%s\n' "$CARGO_TARGET_DIR"
+    return
+  fi
+  for candidate in \
+    "$ROOT_DIR/src-tauri/target" \
+    "$ROOT_DIR/.cargo-target" \
+    "$ROOT_DIR/../.cargo-target"
+  do
+    if [[ -d "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf '%s\n' "$ROOT_DIR/src-tauri/target"
+}
+
 [[ "$(uname -s)" == "Linux" ]] || fail "This Arch package script must be run on Linux."
 case "$(uname -m)" in
   x86_64|amd64) ;;
@@ -50,15 +68,16 @@ cd "$ROOT_DIR"
 
 if [[ "$CLEAN" -eq 1 ]]; then
   info "Cleaning Arch package output."
-  rm -rf dist/arch src-tauri/target/release/bundle
+  TARGET_DIR="$(target_root)"
+  rm -rf dist/arch "$TARGET_DIR/release/bundle"
 fi
 
 if [[ "$RUN_BOOTSTRAP" -eq 1 ]]; then
   info "Running Linux bootstrap."
   if [[ "$RUN_CHECK" -eq 1 ]]; then
-    scripts/bootstrap-linux.sh
+    "$ROOT_DIR/scripts/bootstrap-linux.sh"
   else
-    scripts/bootstrap-linux.sh --skip-check
+    "$ROOT_DIR/scripts/bootstrap-linux.sh" --skip-check
   fi
 else
   info "Skipping bootstrap."
@@ -85,7 +104,8 @@ ICON_NAME="com.myhli.smarteqpresetswitcher"
 info "Building release binary with Tauri production asset embedding, without Tauri bundlers."
 npm run tauri -- build --no-bundle
 
-BIN="$ROOT_DIR/src-tauri/target/release/$BIN_NAME"
+TARGET_DIR="$(target_root)"
+BIN="$TARGET_DIR/release/$BIN_NAME"
 [[ -x "$BIN" ]] || fail "Release binary not found: $BIN"
 
 info "Preparing makepkg workspace."
