@@ -91,12 +91,23 @@ The script installs or verifies:
 - tar and zstd for packaging
 - FUSE compatibility package when available, useful for AppImage workflows
 
+For Windows cross-build support, add `--cross-windows`:
+
+```bash
+scripts/bootstrap-linux.sh --cross-windows
+```
+
+This additionally installs LLVM, LLD, clang, NSIS (from AUR on Arch via `yay`), the
+`x86_64-pc-windows-msvc` Rust target, and `cargo-xwin`. The cross-build scripts
+(`build-windows-from-linux.sh`, `build-linux.sh --windows`) pass this flag
+automatically, so you do not need to specify it manually.
+
 ## Linux builds
 
 The default Linux build now auto-selects the correct package target for the host distro:
 
 - Arch/pacman systems build an Arch package: `dist/arch/*.pkg.tar.zst`
-- Debian/Ubuntu systems build a Debian package: `src-tauri/target/release/bundle/deb/*.deb`
+- Debian/Ubuntu systems build a Debian package: `dist/deb/*.deb`
 - Unknown Linux systems fall back to AppImage.
 
 Run:
@@ -112,6 +123,7 @@ scripts/build-linux.sh --auto
 scripts/build-linux.sh --arch
 scripts/build-linux.sh --deb
 scripts/build-linux.sh --appimage
+scripts/build-linux.sh --windows
 scripts/build-linux.sh --all
 scripts/build-linux.sh --clean
 scripts/build-linux.sh --skip-bootstrap
@@ -145,14 +157,19 @@ The Arch package script builds the Tauri release binary with `tauri build --no-b
 
 ### Debian output
 
-Debian packages are useful for Debian/Ubuntu users, not for installing on Arch. To force `.deb` output:
+Debian packages are useful for Debian/Ubuntu users, not for installing on Arch. To build a proper `.deb`:
 
 ```bash
 scripts/build-linux.sh --deb
+# or directly
+scripts/build-deb.sh
+npm run build:deb
 npm run build:linux:deb
 ```
 
-On Arch, `.deb` output requires `dpkg-deb`. Install the Arch `dpkg` package manually only if you intentionally need to produce Debian packages.
+The Debian package builder mirrors the Arch builder: it produces the Tauri release binary with `tauri build --no-bundle`, then wraps it with `dpkg-deb` including a launcher wrapper, desktop file, icon, license, and proper `DEBIAN/control` metadata. Unlike the basic Tauri deb bundler, it handles Wayland/X11 fallback and provides the `smart-eq-preset-switcher` command.
+
+On Arch, building `.deb` requires `dpkg-deb` from the `dpkg` package — install it only if you intentionally need to produce Debian packages on Arch.
 
 
 ### KDE/Wayland runtime note
@@ -212,9 +229,84 @@ dist/arch/smart-eq-preset-switcher-<version>-1-x86_64.pkg.tar.zst
 
 The Arch package script builds the release binary through `tauri build --no-bundle`, prepares a temporary `makepkg` workspace, writes a generated `PKGBUILD`, installs a launcher wrapper, the desktop file, icon, license and binary through `package()`, and lets `makepkg` create valid pacman package metadata.
 
+
+## Windows NSIS cross-build from Linux
+
+Prefer building Windows installers on Windows or CI. Tauri supports cross-compiling Windows apps from Linux/macOS with caveats, and the documented cross-host path is **NSIS only**; MSI/WiX installers must be created on Windows.
+
+Run from Linux:
+
+```bash
+scripts/build-linux.sh --windows
+# or directly
+scripts/build-windows-from-linux.sh
+npm run build:windows:linux
+```
+
+Useful flags:
+
+```bash
+scripts/build-windows-from-linux.sh --clean
+scripts/build-windows-from-linux.sh --skip-bootstrap
+scripts/build-windows-from-linux.sh --skip-check
+scripts/build-windows-from-linux.sh --no-install
+scripts/build-windows-from-linux.sh --target=x86_64-pc-windows-msvc
+```
+
+Required Linux-side tools:
+
+- `rustup` with `x86_64-pc-windows-msvc`
+- `cargo-xwin`
+- `makensis`
+- `llvm-rc`
+- `lld-link`
+
+On Arch, the script can install official system tools with:
+
+```bash
+sudo pacman -S --needed llvm lld clang
+```
+
+**Note:** `makensis` (NSIS) is in the AUR. Install it with an AUR helper:
+
+```bash
+paru -S nsis   # or yay -S nsis
+```
+
+On Debian/Ubuntu, the script can install:
+
+```bash
+sudo apt install nsis llvm lld clang
+```
+
+The script installs `cargo-xwin` with Cargo if it is missing, then runs:
+
+```bash
+npm run tauri -- build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+```
+
+Expected output:
+
+```text
+src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+```
+
 ## Windows x64 bootstrap
 
-Run from Command Prompt or Windows Terminal:
+The script runs from a regular Command Prompt or Windows Terminal. It
+automatically installs everything through `winget` when available:
+
+- Node.js LTS
+- Rustup
+- Microsoft Edge WebView2 Runtime
+- Visual Studio 2022 Build Tools (with C++ workload)
+
+If `cl.exe` is still not on `PATH` after installation, the script attempts to add the
+C++ workload via the Visual Studio Installer automatically. After all automated steps,
+open a **Developer Command Prompt for VS 2022** from the Start Menu and rerun the script
+if MSVC is still missing.
+
+Run:
 
 ```bat
 scripts\bootstrap-windows.bat
@@ -228,11 +320,7 @@ scripts\bootstrap-windows.bat --skip-check
 scripts\bootstrap-windows.bat --skip-npm
 ```
 
-The script verifies or installs through `winget` when available:
-
-- Node.js LTS
-- Rustup
-- Microsoft Edge WebView2 Runtime
+The script also ensures the `x86_64-pc-windows-msvc` Rust target is installed.
 
 After installing Node.js or Rustup, reopen the terminal if commands are still missing from `PATH`.
 
@@ -252,11 +340,20 @@ scripts\build-windows.bat --skip-bootstrap
 scripts\build-windows.bat --skip-check
 ```
 
+Before building, the script verifies:
+
+- Node.js, cargo, rustc are available
+- `cl.exe` (MSVC) is on PATH — fails with a clear error if not, to prevent cryptic build failures
+- `x86_64-pc-windows-msvc` Rust target is installed — installs it automatically if missing
+- makensis availability (warns only; Tauri bundles NSIS on Windows)
+
 Expected output:
 
 ```text
-src-tauri\target\release\bundle\nsis\*.exe
+src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.exe
 ```
+
+If MSVC is not on `PATH`, run from a **Developer Command Prompt for VS 2022**.
 
 ## Project checks
 
@@ -293,7 +390,11 @@ npm run build:linux
 npm run build:linux:deb
 npm run build:linux:appimage
 npm run build:linux:all
+npm run build:linux:arch
+npm run build:linux:windows
+npm run build:windows:linux
 npm run build:arch
+npm run build:deb
 npm run check:project
 npm run check:source
 npm run check:clean-source

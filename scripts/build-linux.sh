@@ -16,6 +16,7 @@ for arg in "$@"; do
     --arch|--pacman|--pkgbuild|--pkg.tar.zst) MODE="arch" ;;
     --deb) MODE="deb" ;;
     --appimage) MODE="appimage" ;;
+    --windows|--win|--windows-nsis|--cross-windows) MODE="windows" ;;
     --all|--deb-appimage|--appimage-deb) MODE="deb,appimage" ;;
     -h|--help)
       cat <<USAGE
@@ -32,6 +33,7 @@ Build target options:
   --arch                Build Arch pacman package (.pkg.tar.zst).
   --deb                 Build Debian package (.deb).
   --appimage            Build AppImage only. Uses Tauri/linuxdeploy; may be distro-sensitive.
+  --windows             Cross-build Windows x64 NSIS installer from Linux using cargo-xwin.
   --all                 Build Debian package and AppImage.
 
 Other options:
@@ -41,8 +43,9 @@ Other options:
 
 Outputs:
   dist/arch/*.pkg.tar.zst
-  bundle/deb/*.deb       (under the Cargo target directory)
-  bundle/appimage/*.AppImage
+  dist/deb/*.deb
+  src-tauri/target/release/bundle/appimage/*.AppImage
+  <cargo-target-dir>/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
 USAGE
       exit 0
       ;;
@@ -60,16 +63,34 @@ target_root() {
     printf '%s\n' "$CARGO_TARGET_DIR"
     return
   fi
+
+  local cargo_config
+  cargo_config="$ROOT_DIR/.cargo/config.toml"
+  if [[ -f "$cargo_config" ]]; then
+    local cfg_target
+    cfg_target="$(grep -E '^\s*target-dir\s*=' "$cargo_config" 2>/dev/null | sed -E 's/.*=\s*"([^"]+)".*/\1/')"
+    if [[ -n "$cfg_target" ]]; then
+      if [[ "$cfg_target" = /* ]]; then
+        printf '%s\n' "$cfg_target"
+      else
+        # Resolve relative to the parent of .cargo/ (Cargo convention)
+        printf '%s\n' "$(cd "$ROOT_DIR" && realpath "$cfg_target")"
+      fi
+      return
+    fi
+  fi
+
   for candidate in \
-    "$ROOT_DIR/src-tauri/target" \
+    "$ROOT_DIR/../.cargo-target" \
     "$ROOT_DIR/.cargo-target" \
-    "$ROOT_DIR/../.cargo-target"
+    "$ROOT_DIR/src-tauri/target"
   do
     if [[ -d "$candidate" ]]; then
       printf '%s\n' "$candidate"
       return
     fi
   done
+
   printf '%s\n' "$ROOT_DIR/src-tauri/target"
 }
 
@@ -130,27 +151,35 @@ case "$MODE" in
     args=(--skip-bootstrap --skip-check)
     [[ "$CLEAN" -eq 1 ]] && args+=(--clean)
     "$ROOT_DIR/scripts/build-arch-package.sh" "${args[@]}"
+    TARGET_DIR="$(target_root)"
     info "Build artifacts:"
     find dist/arch -type f -name '*.pkg.tar.zst' -print | sort || true
     ;;
   deb)
-    if ! have dpkg-deb; then
-      fail "dpkg-deb is required for .deb bundling. On Arch, install 'dpkg' manually only if you really need .deb output, or run './scripts/build-linux.sh --arch'."
-    fi
     info "Building Debian package."
-    npm run tauri -- build --bundles deb
+    # build-linux.sh has already handled bootstrap/checks above, so do not
+    # repeat the same Svelte/project check inside the delegated deb builder.
+    args=(--skip-bootstrap --skip-check)
+    [[ "$CLEAN" -eq 1 ]] && args+=(--clean)
+    "$ROOT_DIR/scripts/build-deb.sh" "${args[@]}"
     info "Build artifacts:"
-    TARGET_DIR="$(target_root)"
-    find "$TARGET_DIR/release/bundle/deb" -type f -name '*.deb' -print | sort || true
+    find dist/deb -type f -name '*.deb' -print | sort || true
     ;;
   appimage)
     warn "AppImage bundling uses Tauri/linuxdeploy and can fail on some distro/runtime combinations."
     warn "On Arch, prefer './scripts/build-linux.sh --arch'."
     info "Building AppImage."
     npm run tauri -- build --bundles appimage
-    info "Build artifacts:"
     TARGET_DIR="$(target_root)"
+    info "Build artifacts:"
     find "$TARGET_DIR/release/bundle/appimage" -type f -name '*.AppImage' -print | sort || true
+    ;;
+  windows)
+    info "Cross-building Windows NSIS installer from Linux."
+    args=(--skip-bootstrap)
+    [[ "$RUN_CHECK" -eq 0 ]] && args+=(--skip-check)
+    [[ "$CLEAN" -eq 1 ]] && args+=(--clean)
+    "$ROOT_DIR/scripts/build-windows-from-linux.sh" "${args[@]}"
     ;;
   deb,appimage|appimage,deb)
     if ! have dpkg-deb; then
@@ -159,8 +188,8 @@ case "$MODE" in
     warn "AppImage bundling uses Tauri/linuxdeploy and can fail on some distro/runtime combinations."
     info "Building Debian package and AppImage."
     npm run tauri -- build --bundles deb,appimage
-    info "Build artifacts:"
     TARGET_DIR="$(target_root)"
+    info "Build artifacts:"
     find "$TARGET_DIR/release/bundle" -type f \( -name '*.AppImage' -o -name '*.deb' \) -print | sort || true
     ;;
   *)

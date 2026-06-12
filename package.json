@@ -14,6 +14,7 @@
     "bootstrap:linux": "bash scripts/bootstrap-linux.sh",
     "build:linux": "bash scripts/build-linux.sh",
     "build:arch": "bash scripts/build-arch-package.sh",
+    "build:deb": "bash scripts/build-deb.sh",
     "bootstrap:windows": "scripts\\bootstrap-windows.bat",
     "build:windows": "scripts\\build-windows.bat",
     "check:project": "bash scripts/check-project.sh",
@@ -23,7 +24,9 @@
     "build:linux:appimage": "bash scripts/build-linux.sh --appimage",
     "build:linux:all": "bash scripts/build-linux.sh --all",
     "build:linux:auto": "bash scripts/build-linux.sh --auto",
-    "build:linux:arch": "bash scripts/build-linux.sh --arch"
+    "build:linux:arch": "bash scripts/build-linux.sh --arch",
+    "build:linux:windows": "bash scripts/build-linux.sh --windows",
+    "build:windows:linux": "bash scripts/build-windows-from-linux.sh"
   },
   "dependencies": {
     "@lucide/svelte": "1.8.0",
