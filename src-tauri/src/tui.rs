@@ -125,6 +125,12 @@ fn handle_command(args: &[String], state: &mut AppState) -> Result<bool, AppErro
             if snapshot.groups.is_empty() {
                 println!("No preset groups found.");
             } else {
+                {
+                    let guard = state.lock()?;
+                    if guard.is_eq_disabled() {
+                        println!("  (EQ bypassed)");
+                    }
+                }
                 for group in &snapshot.groups {
                     let active = group.active_preset.as_deref().unwrap_or("(none)");
                     println!("{} (active: {})", group.name, active);
@@ -267,6 +273,16 @@ fn handle_command(args: &[String], state: &mut AppState) -> Result<bool, AppErro
                     other => println!("Unknown autorun action: {}", other),
                 }
             }
+            Ok(true)
+        }
+        "disable" => {
+            {
+                let mut guard = state.lock()?;
+                guard.set_eq_disabled(true)?;
+            }
+            #[cfg(target_os = "linux")]
+            crate::commands::disable_linux_eq();
+            println!("EQ bypassed. Select a preset and Apply to re-enable.");
             Ok(true)
         }
         "linux-status" | "status" => {

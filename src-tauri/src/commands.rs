@@ -42,6 +42,13 @@ fn write_install_script() -> Result<PathBuf, AppError> {
     Ok(script_path)
 }
 
+// ---------------------------------------------------------------------------
+// Linux PipeWire EQ constants
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+const LINUX_EQ_SINK_NAME: &str = "smart-eq-preset-switcher.eq";
+
 #[cfg(target_os = "windows")]
 fn installer_log_path() -> PathBuf {
     let token = SystemTime::now()
@@ -405,6 +412,30 @@ done"#;
 }
 
 
+#[cfg(target_os = "linux")]
+pub(crate) fn disable_linux_eq() {
+    use crate::logging::append_log_line;
+
+    append_log_line("INFO", "Disabling EQ: writing flat parametric file (Preamp: -0.1 dB).");
+
+    let base_dir = dirs::config_dir()
+        .map(|d| d.join(crate::state::APP_FOLDER_NAME).join("linux-eq"));
+
+    if let Some(dir) = base_dir {
+        let parametric_path = dir.join("active-parametric-eq.txt");
+        // Write a parametric file with minimal preamp and no filters
+        // This makes the PipeWire filter-chain apply no EQ curve
+        let flat_content = "Preamp: -0.1 dB\n";
+        if let Err(e) = std::fs::write(&parametric_path, flat_content) {
+            append_log_line("WARN", format!("Failed to write flat parametric file: {e}"));
+        } else {
+            append_log_line("INFO", "Flat parametric file written. Restarting PipeWire services...");
+        }
+    }
+
+    let _ = restart_linux_audio_services();
+}
+
 fn build_eq_backend_status(snapshot: PresetLibrary) -> EqBackendStatus {
     let (active_group_name, active_preset_name) = active_selection(&snapshot);
     let has_active = active_preset_name.is_some();
@@ -418,7 +449,13 @@ fn build_eq_backend_status(snapshot: PresetLibrary) -> EqBackendStatus {
             .map(|path| paths_equivalent(path, &config_path))
             .unwrap_or(false);
 
-        let (state, status_label, status_detail) = if !has_active {
+        let (state, status_label, status_detail) = if snapshot.eq_disabled {
+            (
+                "eq_disabled",
+                "EQ bypassed",
+                "EQ processing disabled. Select a preset and Apply to re-enable.",
+            )
+        } else if !has_active {
             (
                 "no_active_preset",
                 "No active preset",
@@ -480,7 +517,13 @@ fn build_eq_backend_status(snapshot: PresetLibrary) -> EqBackendStatus {
         let export_exists = active_export_path.exists();
         let pipewire_config_exists = pipewire_config_path.exists();
 
-        let (state, status_label, status_detail) = if !has_active {
+        let (state, status_label, status_detail) = if snapshot.eq_disabled {
+            (
+                "eq_disabled",
+                "EQ bypassed",
+                "EQ processing disabled. Select a preset and Apply to re-enable.",
+            )
+        } else if !has_active {
             (
                 "no_active_preset",
                 "No active preset",
@@ -735,6 +778,23 @@ pub fn load_presets(state: State<'_, AppState>) -> Result<PresetLibrary, AppErro
 pub fn get_eq_backend_status(state: State<'_, AppState>) -> Result<EqBackendStatus, AppError> {
     let mut guard = state.lock()?;
     let snapshot = guard.snapshot()?;
+    Ok(build_eq_backend_status(snapshot))
+}
+
+#[tauri::command]
+pub fn disable_eq(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<EqBackendStatus, AppError> {
+    {
+        let mut guard = state.lock()?;
+        guard.set_eq_disabled(true)?;
+    }
+
+    #[cfg(target_os = "linux")]
+    disable_linux_eq();
+
+    let snapshot = refresh_runtime(&app)?;
     Ok(build_eq_backend_status(snapshot))
 }
 

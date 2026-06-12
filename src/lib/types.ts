@@ -98,7 +98,8 @@ export type EqBackendState =
   | 'export_ready'
   | 'setup_needed'
   | 'no_active_preset'
-  | 'unsupported';
+  | 'unsupported'
+  | 'eq_disabled';
 
 export type EqBackendStatus = {
   platform: EqBackendPlatform;

@@ -21,6 +21,10 @@ export function getConfigPath() {
 }
 
 
+export function disableEq() {
+  return invoke<EqBackendStatus>('disable_eq');
+}
+
 export function getEqBackendStatus() {
   return invoke<EqBackendStatus>('get_eq_backend_status');
 }

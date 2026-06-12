@@ -23,6 +23,7 @@
   import TroubleshootModal from '$lib/components/TroubleshootModal.svelte';
   import { presetStore } from '$lib/store';
   import {
+    disableEq,
     exportLinuxEqStatus,
     getAutorunEnabled,
     getEqBackendStatus,
@@ -806,6 +807,10 @@
       return 'bg-accent-soft text-accent border-accent/20';
     }
 
+    if (status.state === 'eq_disabled') {
+      return 'bg-amber-500/10 text-amber-200 border-amber-400/25';
+    }
+
     if (status.state === 'connected' || status.state === 'export_ready') {
       return 'bg-success-soft text-success border-success/25';
     }
@@ -820,6 +825,10 @@
   function eqStatusDot(status: EqBackendStatus | null) {
     if (!status) {
       return 'bg-accent';
+    }
+
+    if (status.state === 'eq_disabled') {
+      return 'bg-amber-300';
     }
 
     if (status.state === 'connected' || status.state === 'export_ready') {
@@ -868,6 +877,13 @@
       setStatus(getErrorMessage(error), 'error');
     } finally {
       eqBackendBusy = false;
+    }
+  }
+
+  async function handleDisableEq() {
+    const status = await withBusy(() => disableEq(), 'EQ bypassed');
+    if (status) {
+      await refreshEqBackendStatus(false);
     }
   }
 
@@ -1011,6 +1027,21 @@
             <CircleDot size={14} class={eqStatusDot(eqBackendStatus)} />
             {eqBackendStatus?.statusLabel ?? 'EQ backend'}
           </Button>
+          {#if eqBackendStatus?.state === 'export_ready'}
+            <Button
+              variant="secondary"
+              onclick={handleDisableEq}
+              disabled={busy}
+              class="border border-amber-400/25 bg-amber-500/10 text-amber-200"
+            >
+              Bypass EQ
+            </Button>
+          {/if}
+          {#if eqBackendStatus?.state === 'eq_disabled'}
+            <span class="text-xs text-amber-400">
+              EQ bypassed
+            </span>
+          {/if}
           <Button variant="secondary" onclick={handleImportAppData}>
             <FolderInput size={14} />
             Import App Data
