@@ -75,9 +75,23 @@ package-lock.json.backup
 # Generated changelog
 CHANGELOG.md
 
-# Tauri & Rust
+# Tauri & Rust — generated build artifacts
 src-tauri/target/
 src-tauri/gen/
 .cargo-target/
 **/*.rs.bk
 Cargo.lock.backup
+
+# Windows binary artifacts (extra safety outside src-tauri/target/)
+*.exe
+*.dll
+*.pdb
+*.msi
+*.nupkg
+
+# Python virtual environments (developer tooling)
+venv/
+.venv/
+
+# Stray archives
+Archive.zip
