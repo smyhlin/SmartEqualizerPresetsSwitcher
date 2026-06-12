@@ -72,6 +72,9 @@ dist-ssr/
 build/
 package-lock.json.backup
 
+# Generated changelog
+CHANGELOG.md
+
 # Tauri & Rust
 src-tauri/target/
 src-tauri/gen/
