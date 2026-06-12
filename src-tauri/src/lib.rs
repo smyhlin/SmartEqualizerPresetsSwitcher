@@ -469,18 +469,11 @@ fn toggle_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
 fn show_about_dialog<R: Runtime>(app: &AppHandle<R>) -> Result<(), AppError> {
     append_log_line("INFO", "Opening About dialog.");
 
-    // Emit the app-modal event for an already loaded GUI, but also show a
-    // native dialog so About still works from the tray even if the hidden
-    // webview has not mounted/listened yet.
-    let _ = app.emit(EVENT_OPEN_ABOUT_REQUESTED, ());
+    // Show the window so the embedded AboutModal is visible.
+    show_main_window(app)?;
 
-    app.dialog()
-        .message(
-            "SmartEQPresetSwitcher\n\nCross-platform EQ preset switcher for Windows and Linux.\n\nOn Windows it integrates with Equalizer APO. On Linux it provides GUI, tray, TUI, boot-sync and EQ export workflows."
-        )
-        .title("About SmartEQPresetSwitcher")
-        .kind(MessageDialogKind::Info)
-        .blocking_show();
+    // Emit the event for the frontend AboutModal component.
+    let _ = app.emit(EVENT_OPEN_ABOUT_REQUESTED, ());
 
     Ok(())
 }

@@ -11,7 +11,7 @@
 
   const description =
     'SmartEQPresetSwitcher is a cross-platform desktop app for organizing, editing, applying, importing, exporting, and backing up EQ presets. It supports Equalizer APO on Windows and Linux EQ export workflows such as PipeWire. It is built with SvelteKit, TypeScript, Rust, and Tauri 2.';
-  const repositoryUrl = 'https://github.com/smyhlin/SmartEQPresetSwitcher';
+  const repositoryUrl = 'https://github.com/smyhlin/SmartEqualizerPresetsSwitcher';
 
   function close() {
     onClose?.();
